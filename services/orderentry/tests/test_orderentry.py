@@ -5,6 +5,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from trading_core import KillSwitchState
 from trading_fix import FixSession, SeqStore, SessionConfig
 from trading_orderentry import (
     Instrument,
@@ -172,6 +173,32 @@ def test_orders_are_rejected_while_disconnected():
             await wait_for(lambda: not h.session.logged_on)
             order = h.oe.submit("alice", SYMBOL, "BUY", 1, 40.0)
             assert order.status == Status.REJECTED and "not connected" in order.text
+
+    run(scenario())
+
+
+def test_kill_switch_stops_trading_and_cancels_everything():
+    async def scenario():
+        async with Harness() as h:
+            resting = h.oe.submit("alice", SYMBOL, "BUY", 2, h.best(BID) - 1.0)
+            await wait_for(lambda: resting.status == Status.NEW)
+            h.oe.set_kill_switch(KillSwitchState(active=True, reason="position break", by="dropcopy"))
+            await wait_for(lambda: resting.status == Status.CANCELED)
+            blocked = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            assert blocked.status == Status.REJECTED and "halted" in blocked.text and "position break" in blocked.text
+            h.oe.set_kill_switch(KillSwitchState(active=False, by="bob"))
+            again = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            await wait_for(lambda: again.status == Status.NEW)
+
+    run(scenario())
+
+
+def test_positions_by_trader():
+    async def scenario():
+        async with Harness() as h:
+            order = h.oe.submit("alice", SYMBOL, "BUY", 2, h.best(OFFER))
+            await wait_for(lambda: order.status == Status.FILLED)
+            assert h.oe.positions_by_trader() == {"alice": {SYMBOL: 2}}
 
     run(scenario())
 

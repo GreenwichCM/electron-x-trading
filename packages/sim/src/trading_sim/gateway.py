@@ -3,24 +3,27 @@
 Reproduces the rules the real gateways enforce at logon and on sequence numbers:
   * Logon needs the right password and DefaultApplVerID(1137)=9, and must not carry SenderSubID(50)
   * one connection per SenderCompID
-  * sequence numbers persist across reconnects (unless the Logon carries ResetSeqNumFlag(141)=Y)
+  * sequence numbers persist across reconnects (unless the Logon carries ResetSeqNumFlag(141)=Y),
+    and with a `state_path` also across restarts of the simulator, until the weekly reset
   * MsgSeqNum too low -> Logout "MsgSeqNum too low, expecting N"
-  * ResendRequest -> application messages replayed with PossDupFlag, admin messages gap-filled
+  * ResendRequest -> application messages replayed with PossDupFlag, admin messages gap-filled;
+    answered even while we are waiting for a resend ourselves, or both sides would wait forever
   * a Heartbeat whenever nothing has been sent for HeartBtInt
-
-Order matching and market data are added on top of this in later steps.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import time
 from collections import Counter
 from collections.abc import Callable
+from pathlib import Path
 
-from trading_fix import FixMessage, FixParseError, FixParser, encode, utc_timestamp
+from trading_fix import FixMessage, FixParseError, FixParser, encode, fix_week_start, utc_timestamp
 
 log = logging.getLogger("sim")
 
@@ -33,12 +36,13 @@ Fields = list[tuple[int, str]]
 class SimSession:
     """State for one SenderCompID. Outlives TCP connections, like on the real gateway."""
 
-    def __init__(self, sender: str):
+    def __init__(self, sender: str, on_change: Callable[[], None] | None = None):
         self.sender = sender
         self.out_seq = 1
         self.in_expected = 1
         self.history: dict[int, tuple[str, Fields]] = {}
         self.conn: SimConnection | None = None
+        self.on_change = on_change  # saves sequence numbers when the gateway has a state file
         self.received: list[FixMessage] = []  # application messages from the client, for tests
         self.received_types: Counter[str] = Counter()  # every message type from the client, for tests
         self.logon_seqs: list[int] = []  # MsgSeqNum of each accepted Logon, for tests
@@ -55,6 +59,8 @@ class SimSession:
             self.history[seq] = (msg_type, body)
         if self.conn is not None:
             self.conn.write(msg_type, body, seq)
+        if self.on_change is not None:
+            self.on_change()
         return seq
 
 
@@ -66,6 +72,7 @@ class SimConnection:
         self.last_sent = time.monotonic()
         self.heartbeat_s = 30
         self.logout_sent = False
+        self.awaiting_resend = False
 
     def write(self, msg_type: str, body: Fields, seq: int, poss_dup: bool = False, sender: str = "") -> None:
         now = utc_timestamp()
@@ -89,15 +96,21 @@ class SimConnection:
 
 
 class SimGateway:
-    """An acceptor for one gateway port. `passwords` maps SenderCompID -> password."""
+    """An acceptor for one gateway port. `passwords` maps SenderCompID -> password.
 
-    def __init__(self, passwords: dict[str, str]):
+    With `state_path`, sequence numbers are saved there and reloaded when the simulator restarts (old
+    messages are not kept, so a resend of them is gap-filled). Without it every restart starts at 1.
+    """
+
+    def __init__(self, passwords: dict[str, str], state_path: Path | None = None):
         self.passwords = passwords
+        self.state_path = state_path
         self.sessions: dict[str, SimSession] = {}
         self.rejected_logons = 0
         self.on_app_message: Callable[[SimSession, FixMessage], None] | None = None
         self._server: asyncio.Server | None = None
         self.port = 0
+        self._load()
 
     async def start(self, host: str = "127.0.0.1", port: int = 0) -> int:
         """Start listening. Port 0 picks a free port; the chosen one is returned."""
@@ -113,9 +126,12 @@ class SimGateway:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
+        self.save()
 
     def session(self, sender: str) -> SimSession:
-        return self.sessions.setdefault(sender, SimSession(sender))
+        if sender not in self.sessions:
+            self.sessions[sender] = SimSession(sender, on_change=self.save if self.state_path else None)
+        return self.sessions[sender]
 
     def send_app(self, sender: str, msg_type: str, body: Fields) -> int:
         """Send an application message to a client (queued for resend if it is disconnected)."""
@@ -126,6 +142,32 @@ class SimGateway:
         s = self.sessions.get(sender)
         if s is not None and s.conn is not None:
             s.conn.writer.transport.abort()
+
+    # ---- saved sequence numbers ------------------------------------------------------------
+
+    def save(self) -> None:
+        if self.state_path is None:
+            return
+        data = {
+            "week": fix_week_start().isoformat(),
+            "sessions": {s.sender: [s.out_seq, s.in_expected] for s in self.sessions.values()},
+        }
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, self.state_path)
+
+    def _load(self) -> None:
+        if self.state_path is None or not self.state_path.exists():
+            return
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        if data.get("week") != fix_week_start().isoformat():
+            log.info("weekly sequence reset since the simulator last ran")
+            return
+        for sender, (out_seq, in_expected) in data.get("sessions", {}).items():
+            s = self.session(sender)
+            s.out_seq, s.in_expected = int(out_seq), int(in_expected)
+        log.info("restored sequence numbers for %s", ", ".join(sorted(self.sessions)) or "nobody")
 
     # ---- connection handling ---------------------------------------------------------------
 
@@ -160,6 +202,7 @@ class SimGateway:
                 conn.reject_logon(sender, "First message must be Logon")
                 return
             self._on_logon(conn, msg)
+            self.save()
             return
 
         s = conn.session
@@ -167,6 +210,8 @@ class SimGateway:
         seq = msg.get_int(34)
         if mt == "4" and msg.get(123) == "Y":  # SequenceReset-GapFill
             s.in_expected = msg.get_int(36)
+            conn.awaiting_resend = False
+            self.save()
             return
         if seq < s.in_expected:
             if msg.get(43) == "Y":
@@ -174,9 +219,15 @@ class SimGateway:
             self._logout(conn, f"MsgSeqNum too low, expecting {s.in_expected} but received {seq}")
             return
         if seq > s.in_expected:
-            s.send("2", [(7, str(s.in_expected)), (16, "0")])
+            if mt == "2":  # answer the client's ResendRequest even while we wait for our own
+                self._resend(conn, msg.get_int(7), msg.get_int(16))
+            if not conn.awaiting_resend:
+                conn.awaiting_resend = True
+                s.send("2", [(7, str(s.in_expected)), (16, "0")])
             return
         s.in_expected += 1
+        conn.awaiting_resend = False
+        self.save()
 
         if mt == "0":
             pass
@@ -230,6 +281,7 @@ class SimGateway:
         s.send("A", body)
         log.info("%s logged on (seq %d)", sender, seq)
         if seq > s.in_expected:
+            conn.awaiting_resend = True
             s.send("2", [(7, str(s.in_expected)), (16, "0")])
         else:
             s.in_expected = seq + 1

@@ -8,6 +8,7 @@ import time
 from collections.abc import Mapping
 from decimal import Decimal
 
+from trading_core import KillSwitchState
 from trading_fix import FixMessage, FixSession, SessionError, utc_timestamp
 
 from .orders import FROM_ORD_STATUS, SIDE_TO_FIX, TIF_TO_FIX, Order, Status, now_iso
@@ -55,6 +56,7 @@ class OrderEntryApp:
         self.positions: dict[tuple[str, str], int] = {}  # (trader, symbol) -> net lots, from our fills
         self._cancel_ids: dict[str, str] = {}  # cancel request ClOrdID -> order ClOrdID
         self._before_cancel: dict[str, Status] = {}
+        self.kill_switch = KillSwitchState()
         self._ids = itertools.count(1)
         self._id_prefix = f"T{int(time.time()):x}"
 
@@ -90,6 +92,31 @@ class OrderEntryApp:
             raise OrderError(503, "not connected to the exchange")
         if not self.throttle.allow(is_cancel=True):
             raise OrderError(429, "message rate limit reached; try again in a moment")
+        self._send_cancel(order)
+        return order
+
+    def set_kill_switch(self, state: KillSwitchState) -> None:
+        """Called with the current kill switch state about once a second. While it is on, no new orders
+        are accepted and every live order is cancelled (retried on each call until none are left)."""
+        if state.active and not self.kill_switch.active:
+            log.critical("kill switch ON (%s by %s): rejecting new orders, cancelling all", state.reason, state.by)
+        elif not state.active and self.kill_switch.active:
+            log.warning("kill switch OFF (by %s): accepting orders again", state.by)
+        self.kill_switch = state
+        if state.active and self._logged_on():
+            for order in list(self.orders.values()):
+                if order.live and order.status != Status.PENDING_CANCEL:
+                    if not self.throttle.allow(is_cancel=True):
+                        return  # the rest go out on the next call
+                    self._send_cancel(order)
+
+    def positions_by_trader(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for (trader, symbol), qty in self.positions.items():
+            out.setdefault(trader, {})[symbol] = qty
+        return out
+
+    def _send_cancel(self, order: Order) -> None:
         cancel_id = self._new_id()
         self._cancel_ids[cancel_id] = order.cl_ord_id
         self._before_cancel[order.cl_ord_id] = order.status
@@ -108,7 +135,6 @@ class OrderEntryApp:
             header=[(50, self._exchange_trader(order.trader))],
         )
         self._update(order, status=Status.PENDING_CANCEL)
-        return order
 
     def orders_for(self, trader: str | None = None) -> list[Order]:
         """All orders (trader=None) or one trader's, newest first."""
@@ -173,6 +199,8 @@ class OrderEntryApp:
     # ---- helpers ---------------------------------------------------------------------------
 
     def _precheck(self, order: Order) -> str | None:
+        if self.kill_switch.active:
+            return f"trading is halted (kill switch: {self.kill_switch.reason})"
         if order.side not in SIDE_TO_FIX:
             return f"side must be BUY or SELL, not {order.side}"
         if order.tif not in TIF_TO_FIX:

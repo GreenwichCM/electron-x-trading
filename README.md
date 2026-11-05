@@ -11,7 +11,8 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 | `packages/fix` | FIX session layer (logon, heartbeats, sequence numbers, resend, mutual TLS) |
 | `packages/sim` | Simulated ElectronX gateways for tests and development |
 | `services/marketdata` | MD session -> order books -> Redis |
-| `services/orderentry` | Pre-trade risk, throttle, OE session, internal order endpoint |
+| `services/orderentry` | Pre-trade risk, throttle, OE session, internal order endpoint, kill switch |
+| `services/dropcopy` | The exchange's copy of every fill: positions, break detection, kill switch trip |
 | `services/api` | FastAPI: login, permissions, REST and WebSockets for the web app |
 | `web` | React + TypeScript trading UI |
 
@@ -19,6 +20,8 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 
 Copy each `.env.example` to `.env` next to it and fill in the secrets (see the comments in each file).
 `services/api/.env` and `services/orderentry/.env` must have the same `OE_INTERNAL_TOKEN`.
+
+Only one copy of orderentry and of dropcopy may run at a time; a second one refuses to start.
 
     uv sync
     npm --prefix web install
@@ -30,6 +33,14 @@ Copy each `.env.example` to `.env` next to it and fill in the secrets (see the c
 
 Then open http://localhost:5173 and sign in as a test user. Ctrl-C stops all services.
 To run only some: `uv run honcho start sim marketdata`.
+
+## Start again from a clean slate
+
+Positions, sequence numbers and order history live in `var/` and in Redis. To wipe them all
+(development only), stop everything, then:
+
+    rm -rf var
+    docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions
 
 ## Tests
 

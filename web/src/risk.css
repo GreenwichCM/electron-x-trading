@@ -1,0 +1,58 @@
+.killswitch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.killswitch.on {
+  background: rgba(239, 138, 92, 0.15);
+  border: 1px solid var(--ask);
+  color: var(--text);
+}
+.killswitch.on strong {
+  color: var(--ask);
+}
+.killswitch .meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+.killswitch.off {
+  border: 1px dashed var(--line);
+  color: var(--muted);
+}
+.killswitch input {
+  flex: 1;
+  min-width: 200px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.killswitch .error {
+  width: 100%;
+  margin: 0;
+  font-size: 13px;
+}
+button.halt {
+  border-color: var(--ask);
+  color: var(--ask);
+}
+button.resume {
+  margin-left: auto;
+  border-color: var(--bid);
+  color: var(--bid);
+}
+
+.positions {
+  margin-top: 24px;
+}
+.positions tr.break td {
+  background: rgba(239, 138, 92, 0.12);
+}

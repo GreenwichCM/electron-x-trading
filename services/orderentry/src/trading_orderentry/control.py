@@ -54,4 +54,9 @@ def create_control_app(oe: OrderEntryApp, token: str) -> FastAPI:
     def list_orders(trader: str | None = None) -> list[dict[str, Any]]:
         return [o.to_dict() for o in oe.orders_for(trader)]
 
+    @app.get("/positions")
+    def positions() -> dict[str, dict[str, int]]:
+        """Net lots per trader and symbol, from orderentry's own fills."""
+        return oe.positions_by_trader()
+
     return app

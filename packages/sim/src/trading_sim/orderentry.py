@@ -6,11 +6,14 @@ Follows the ElectronX rules the OMS depends on:
   * price on the tick and inside the instrument's limits, instrument must be OPEN
   * price-time matching against everything resting in the shared book
   * rejects come back as ExecutionReport 150=8, unknown cancels as OrderCancelReject [9]
+  * every ExecutionReport is also copied to the drop copy sessions, which share this port and may
+    not send orders themselves
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from trading_fix import FixMessage, utc_timestamp
@@ -49,9 +52,10 @@ class ClientOrder:
 class SimOrderEntry:
     """Attach to the order entry SimGateway; shares the book of `md`."""
 
-    def __init__(self, gateway: SimGateway, md: SimMarketData):
+    def __init__(self, gateway: SimGateway, md: SimMarketData, drop_copy_senders: Iterable[str] = ()):
         self.gateway = gateway
         self.md = md
+        self.drop_copy_senders = set(drop_copy_senders)
         gateway.on_app_message = self._on_message
         md.on_fill = self._on_resting_fill
         self.orders: dict[str, ClientOrder] = {}  # OrderID -> order
@@ -60,7 +64,9 @@ class SimOrderEntry:
     # ---- requests --------------------------------------------------------------------------
 
     def _on_message(self, session: SimSession, msg: FixMessage) -> None:
-        if msg.msg_type in ("D", "F") and not msg.get(50):
+        if session.sender in self.drop_copy_senders:
+            business_reject(session, msg, 3, "Drop copy sessions cannot send orders")
+        elif msg.msg_type in ("D", "F") and not msg.get(50):
             business_reject(session, msg, 5, "SenderSubID(50) required on order messages")
         elif msg.msg_type == "D":
             self._new_order(session, msg)
@@ -235,3 +241,6 @@ class SimOrderEntry:
         if text:
             body.append((58, text))
         session.send("8", body)
+        for sender in self.drop_copy_senders:
+            # Kept for resend even while the drop copy session is disconnected, like on the real gateway.
+            self.gateway.session(sender).send("8", list(body))

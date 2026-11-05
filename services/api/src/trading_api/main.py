@@ -6,14 +6,17 @@ and string annotations could not see the dependency functions defined inside cre
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
+from trading_core import ALERTS_STREAM, KILLSWITCH_KEY, KillSwitchState
 
 from .auth import Authenticator, DevAuthenticator, User
 from .hub import ClientFeed, MarketDataHub
@@ -40,6 +43,14 @@ class NewOrderRequest(BaseModel):
     tif: Literal["DAY", "GTC", "IOC", "FOK"] = "DAY"
 
 
+class KillSwitchRequest(BaseModel):
+    active: bool
+    reason: str = ""
+
+
+DC_POSITIONS_KEY = "dc:positions"
+
+
 def create_app(
     redis: Redis | None = None,
     settings: Settings | None = None,
@@ -57,6 +68,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         client = redis if redis is not None else Redis.from_url(settings.redis_url)
+        app.state.redis = client
         app.state.hub = MarketDataHub(client)
         app.state.orders = OrderHub(client)
         tasks = [
@@ -158,6 +170,44 @@ def create_app(
     @app.post("/api/orders/{cl_ord_id}/cancel")
     async def cancel_order(cl_ord_id: str, user: Annotated[User, Depends(require("orders.trade"))]) -> dict[str, Any]:
         return await call_orderentry(oe.cancel(user.id, cl_ord_id))
+
+    @app.get("/api/killswitch")
+    async def kill_switch(user: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
+        """Everyone signed in may see whether trading is halted, and why."""
+        return KillSwitchState.from_json(await app.state.redis.get(KILLSWITCH_KEY)).__dict__
+
+    @app.post("/api/killswitch")
+    async def set_kill_switch(
+        body: KillSwitchRequest, user: Annotated[User, Depends(require("killswitch.trip"))]
+    ) -> dict[str, Any]:
+        if body.active and not body.reason.strip():
+            raise HTTPException(status_code=400, detail="give a reason for halting trading")
+        state = KillSwitchState(
+            active=body.active,
+            reason=body.reason.strip(),
+            by=user.id,
+            time=datetime.now(UTC).isoformat(timespec="milliseconds"),
+        )
+        await app.state.redis.set(KILLSWITCH_KEY, state.to_json())
+        await app.state.redis.xadd(ALERTS_STREAM, {"data": state.to_json()}, maxlen=10_000)
+        log.warning("kill switch %s by %s: %s", "ON" if state.active else "OFF", user.id, state.reason)
+        return state.__dict__
+
+    @app.get("/api/positions")
+    async def positions(user: Annotated[User, Depends(require("risk.view.all"))]) -> dict[str, Any]:
+        """The exchange's positions for the whole account (drop copy) next to orderentry's, per trader."""
+        raw = await app.state.redis.get(DC_POSITIONS_KEY)
+        dc = json.loads(raw) if raw else {"positions": {}, "connected": False, "time": ""}
+        try:
+            by_trader = await oe.positions()
+        except OrderEntryUnavailable, OrderEntryError:
+            by_trader = None
+        return {
+            "exchange": dc["positions"],
+            "dropcopy_connected": dc["connected"],
+            "exchange_time": dc["time"],
+            "by_trader": by_trader,
+        }
 
     # ---- WebSockets ------------------------------------------------------------------------
 

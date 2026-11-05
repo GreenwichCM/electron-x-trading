@@ -7,6 +7,7 @@ members = [
     "trading",
     "trading-api",
     "trading-core",
+    "trading-dropcopy",
     "trading-fix",
     "trading-marketdata",
     "trading-orderentry",
@@ -477,6 +478,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "trading-api" },
     { name = "trading-core" },
+    { name = "trading-dropcopy" },
     { name = "trading-fix" },
     { name = "trading-marketdata" },
     { name = "trading-orderentry" },
@@ -496,6 +498,7 @@ dev = [
 requires-dist = [
     { name = "trading-api", editable = "services/api" },
     { name = "trading-core", editable = "packages/core" },
+    { name = "trading-dropcopy", editable = "services/dropcopy" },
     { name = "trading-fix", editable = "packages/fix" },
     { name = "trading-marketdata", editable = "services/marketdata" },
     { name = "trading-orderentry", editable = "services/orderentry" },
@@ -520,6 +523,7 @@ dependencies = [
     { name = "httpx2" },
     { name = "pyjwt" },
     { name = "redis" },
+    { name = "trading-core" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -529,6 +533,7 @@ requires-dist = [
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "redis", specifier = ">=5.2.1" },
+    { name = "trading-core", editable = "packages/core" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
 
@@ -542,6 +547,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.14.1" }]
+
+[[package]]
+name = "trading-dropcopy"
+version = "0.1.0"
+source = { editable = "services/dropcopy" }
+dependencies = [
+    { name = "redis" },
+    { name = "trading-core" },
+    { name = "trading-fix" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "redis", specifier = ">=5.2.1" },
+    { name = "trading-core", editable = "packages/core" },
+    { name = "trading-fix", editable = "packages/fix" },
+]
 
 [[package]]
 name = "trading-fix"

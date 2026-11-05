@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, clearToken, getToken, Unauthorized, type User } from "./auth";
 import Blotter from "./Blotter";
+import KillSwitch from "./KillSwitch";
 import Login from "./Login";
 import OrderTicket, { type TicketPreset } from "./OrderTicket";
+import Positions from "./Positions";
 import { type Book, useMarketData } from "./useMarketData";
 import { useOrders } from "./useOrders";
 
@@ -74,6 +76,7 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
           Sign out
         </button>
       </header>
+      <KillSwitch user={user} />
       <div className="workspace">
         <table className="prices">
           <thead>
@@ -108,6 +111,7 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
         <OrderTicket symbols={rows.map((b) => b.symbol)} canTrade={canTrade} preset={preset} />
       </div>
       <Blotter orders={orderList} user={user} />
+      {user.permissions.includes("risk.view.all") && <Positions />}
       <section className="permissions">
         <h2>Your permissions</h2>
         <div className="chips">

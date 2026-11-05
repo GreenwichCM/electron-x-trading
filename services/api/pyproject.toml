@@ -4,12 +4,16 @@ version = "0.1.0"
 description = "HTTP and WebSocket API for the trading UI and risk dashboard"
 requires-python = ">=3.14"
 dependencies = [
+    "trading-core",
     "fastapi>=0.115.6",
     "uvicorn[standard]>=0.34.0",
     "redis>=5.2.1",
     "pyjwt>=2.10.1",
     "httpx2>=2.16.0",
 ]
+
+[tool.uv.sources]
+trading-core = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]

@@ -11,7 +11,8 @@ import sys
 import uvicorn
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from trading_fix import FixSession, SeqStore, build_ssl_context
+from trading_core import KILLSWITCH_KEY, KillSwitchState
+from trading_fix import AlreadyRunning, FixSession, SeqStore, build_ssl_context, lock_state_dir
 
 from .app import OrderEntryApp
 from .control import create_control_app
@@ -36,12 +37,26 @@ async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 
         await asyncio.sleep(every_s)
 
 
+async def watch_kill_switch(redis: Redis, oe: OrderEntryApp, every_s: float = 0.5) -> None:
+    """Follow the kill switch in Redis. If Redis is unreachable the last known state is kept."""
+    while True:
+        try:
+            oe.set_kill_switch(KillSwitchState.from_json(await redis.get(KILLSWITCH_KEY)))
+        except (RedisError, OSError) as exc:
+            log.warning("could not read the kill switch: %s", exc)
+        await asyncio.sleep(every_s)
+
+
 async def main() -> None:
     try:
         settings = Settings.from_env()
     except ConfigError as exc:
         sys.exit(f"config error: {exc}")
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    try:
+        lock = lock_state_dir(settings.state_dir)  # noqa: F841 - held until the process exits
+    except AlreadyRunning as exc:
+        sys.exit(f"orderentry is already running: {exc}")
 
     redis = Redis.from_url(settings.redis_url)
     sink = RedisOrderSink(redis)
@@ -80,6 +95,7 @@ async def main() -> None:
         asyncio.create_task(session.run(), name="oe-session"),
         asyncio.create_task(control.serve(), name="control"),
         asyncio.create_task(refresh_instruments(redis, oe), name="instruments"),
+        asyncio.create_task(watch_kill_switch(redis, oe), name="killswitch"),
     }
     stop_task = asyncio.create_task(stop.wait(), name="stop")
     done, _ = await asyncio.wait(tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -92,7 +108,7 @@ async def main() -> None:
     await session.stop()
     await sink.close()
     for task in tasks:
-        if task.get_name() == "instruments":
+        if task.get_name() in ("instruments", "killswitch"):
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await redis.aclose()

@@ -36,6 +36,9 @@ class OrderEntryClient:
     async def list(self, trader: str | None = None) -> list[dict[str, Any]]:
         return await self._request("GET", "/orders", params={"trader": trader} if trader else None)
 
+    async def positions(self) -> dict[str, dict[str, int]]:
+        return await self._request("GET", "/positions")
+
     async def aclose(self) -> None:
         await self._http.aclose()
 
