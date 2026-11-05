@@ -21,6 +21,8 @@ class Settings:
     log_level: str = "INFO"
     dev_login: bool = False
     dev_secret: str = ""
+    oe_url: str = "http://127.0.0.1:8100"
+    oe_token: str = ""
 
     def __post_init__(self) -> None:
         if self.dev_login and self.host not in LOOPBACK:
@@ -40,4 +42,6 @@ class Settings:
             log_level=get("LOG_LEVEL", cls.log_level).upper(),
             dev_login=get("API_DEV_LOGIN", "N").upper() in ("Y", "YES", "1", "TRUE"),
             dev_secret=get("API_DEV_SECRET", ""),
+            oe_url=get("OE_URL", cls.oe_url),
+            oe_token=get("OE_INTERNAL_TOKEN", ""),
         )

@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "redis>=5.2.1",
     "pyjwt>=2.10.1",
+    "httpx2>=2.16.0",
 ]
 
 [build-system]

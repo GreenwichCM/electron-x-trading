@@ -4,6 +4,9 @@ Messages follow the ElectronX layouts:
   * SecurityListRequest [x] -> SecurityList [y] with tick size, lot size and price limits
   * MarketDataRequest [V] -> snapshot [W], then incremental refreshes [X] while subscribed
   * every resting order is its own entry, keyed by MDEntryID(278); trades are MDEntryType(269)=2
+
+The book is shared with the simulated order entry gateway, so client orders show up in market data
+and trade against the synthetic liquidity.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import asyncio
 import itertools
 import logging
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -43,6 +47,11 @@ class RestingOrder:
     side: str  # BID or OFFER
     ticks: int
     qty: int
+    owner: str | None = None  # SenderCompID of a client order; None for the simulator's own liquidity
+
+
+#: Called when a client's resting order is filled: (symbol, order, filled qty, price in ticks).
+FillListener = Callable[[str, RestingOrder, int, int], None]
 
 
 def _now_parts() -> tuple[str, str]:
@@ -62,6 +71,7 @@ class SimMarketData:
         self.books: dict[str, dict[str, RestingOrder]] = {i.symbol: {} for i in instruments}
         self.fair: dict[str, int] = {i.symbol: round(i.fair / i.tick) for i in instruments}
         self.subscriptions: dict[str, dict[str, str]] = {}  # SenderCompID -> {symbol: MDReqID}
+        self.on_fill: FillListener | None = None
         self.rng = random.Random(seed)
         self._ids = itertools.count(1)
         self._pending: dict[str, list[Fields]] = {}
@@ -71,17 +81,30 @@ class SimMarketData:
                 self.add_order(symbol, OFFER, self.fair[symbol] + k, self.rng.randint(1, 10))
         self._pending.clear()  # nobody is subscribed yet
 
-    # ---- book changes (also used directly by tests) ----------------------------------------
+    def new_id(self, prefix: str) -> str:
+        return f"{prefix}{next(self._ids)}"
 
-    def best(self, symbol: str, side: str) -> float | None:
+    # ---- book queries ----------------------------------------------------------------------
+
+    def best_ticks(self, symbol: str, side: str) -> int | None:
         prices = [o.ticks for o in self.books[symbol].values() if o.side == side]
         if not prices:
             return None
-        ticks = max(prices) if side == BID else min(prices)
-        return ticks * self.instruments[symbol].tick
+        return max(prices) if side == BID else min(prices)
 
-    def add_order(self, symbol: str, side: str, ticks: int, qty: int) -> str:
-        order = RestingOrder(f"O{next(self._ids)}", side, ticks, qty)
+    def best(self, symbol: str, side: str) -> float | None:
+        ticks = self.best_ticks(symbol, side)
+        return None if ticks is None else ticks * self.instruments[symbol].tick
+
+    def oldest_at(self, symbol: str, side: str, ticks: int) -> RestingOrder | None:
+        return next((o for o in self.books[symbol].values() if o.side == side and o.ticks == ticks), None)
+
+    # ---- book changes (also used directly by tests) ----------------------------------------
+
+    def add_order(
+        self, symbol: str, side: str, ticks: int, qty: int, owner: str | None = None, order_id: str | None = None
+    ) -> str:
+        order = RestingOrder(order_id or self.new_id("O"), side, ticks, qty, owner)
         self.books[symbol][order.order_id] = order
         self._entry(symbol, NEW, order)
         return order.order_id
@@ -90,23 +113,15 @@ class SimMarketData:
         order = self.books[symbol].pop(order_id)
         self._entry(symbol, DELETE, order)
 
-    def trade(self, symbol: str, aggressor: str, qty: int) -> float | None:
-        """An outside taker hits the best bid (aggressor SELL) or lifts the best offer (aggressor BUY)."""
-        side = OFFER if aggressor == BUY else BID
-        resting = [o for o in self.books[symbol].values() if o.side == side]
-        if not resting:
-            return None
-        best_ticks = min(o.ticks for o in resting) if side == OFFER else max(o.ticks for o in resting)
-        order = next(o for o in resting if o.ticks == best_ticks)  # oldest first at that price
-        filled = min(qty, order.qty)
-        order.qty -= filled
-        if order.qty == 0:
-            del self.books[symbol][order.order_id]
-            self._entry(symbol, DELETE, order)
+    def execute(self, symbol: str, resting: RestingOrder, qty: int, aggressor: str) -> int:
+        """Fill `qty` of a resting order against an incoming aggressor; returns the price in ticks."""
+        resting.qty -= qty
+        if resting.qty == 0:
+            del self.books[symbol][resting.order_id]
+            self._entry(symbol, DELETE, resting)
         else:
-            self._entry(symbol, CHANGE, order)
-        inst = self.instruments[symbol]
-        trade_id = f"T{next(self._ids)}"
+            self._entry(symbol, CHANGE, resting)
+        trade_id = self.new_id("T")
         d, t = _now_parts()
         self._pending.setdefault(symbol, []).append(
             [
@@ -114,40 +129,61 @@ class SimMarketData:
                 (269, TRADE),
                 (278, trade_id + "P"),
                 (55, symbol),
-                (270, self._fmt(inst, best_ticks)),
-                (271, str(filled)),
+                (270, self.fmt(symbol, resting.ticks)),
+                (271, str(qty)),
                 (272, d),
                 (273, t),
                 (1003, trade_id),
                 (2446, aggressor),
             ]
         )
-        return best_ticks * inst.tick
+        if resting.owner is not None and self.on_fill is not None:
+            self.on_fill(symbol, resting, qty, resting.ticks)
+        return resting.ticks
+
+    def trade(self, symbol: str, aggressor: str, qty: int) -> float | None:
+        """An outside taker hits the best bid (aggressor SELL) or lifts the best offer (aggressor BUY)."""
+        side = OFFER if aggressor == BUY else BID
+        best_ticks = self.best_ticks(symbol, side)
+        if best_ticks is None:
+            return None
+        order = self.oldest_at(symbol, side, best_ticks)
+        assert order is not None
+        self.execute(symbol, order, min(qty, order.qty), aggressor)
+        return best_ticks * self.instruments[symbol].tick
 
     def move_fair(self, symbol: str, ticks: int) -> None:
-        """Shift fair value and pull any resting order that would now cross it."""
+        """Shift fair value and pull any of the simulator's own orders that would now cross it."""
         self.fair[symbol] += ticks
         fair = self.fair[symbol]
         for order in list(self.books[symbol].values()):
+            if order.owner is not None:
+                continue  # client orders stay until they trade or are cancelled
             if (order.side == BID and order.ticks >= fair) or (order.side == OFFER and order.ticks <= fair):
                 self.cancel_order(symbol, order.order_id)
+
+    def _quote(self, symbol: str, side: str, ticks: int, qty: int) -> None:
+        """Add synthetic liquidity, or trade if the price would cross a resting order."""
+        opposite = OFFER if side == BID else BID
+        best = self.best_ticks(symbol, opposite)
+        crosses = best is not None and (ticks >= best if side == BID else ticks <= best)
+        if crosses:
+            self.trade(symbol, BUY if side == BID else SELL, qty)
+        else:
+            self.add_order(symbol, side, ticks, qty)
 
     def step(self) -> None:
         """One random change per instrument, then send the batched updates."""
         for symbol in self.books:
             r = self.rng.random()
-            orders = list(self.books[symbol].values())
+            synthetic = [o for o in self.books[symbol].values() if o.owner is None]
             if r < 0.35:
                 side = self.rng.choice((BID, OFFER))
                 k = self.rng.randint(1, 6)
-                self.add_order(
-                    symbol,
-                    side,
-                    self.fair[symbol] - k if side == BID else self.fair[symbol] + k,
-                    self.rng.randint(1, 10),
-                )
-            elif r < 0.6 and orders:
-                self.cancel_order(symbol, self.rng.choice(orders).order_id)
+                ticks = self.fair[symbol] - k if side == BID else self.fair[symbol] + k
+                self._quote(symbol, side, ticks, self.rng.randint(1, 10))
+            elif r < 0.6 and synthetic:
+                self.cancel_order(symbol, self.rng.choice(synthetic).order_id)
             elif r < 0.8:
                 self.trade(symbol, self.rng.choice((BUY, SELL)), self.rng.randint(1, 3))
             else:
@@ -155,12 +191,8 @@ class SimMarketData:
             for side in (BID, OFFER):  # keep both sides populated
                 if sum(1 for o in self.books[symbol].values() if o.side == side) < 2:
                     k = self.rng.randint(1, 3)
-                    self.add_order(
-                        symbol,
-                        side,
-                        self.fair[symbol] - k if side == BID else self.fair[symbol] + k,
-                        self.rng.randint(1, 10),
-                    )
+                    ticks = self.fair[symbol] - k if side == BID else self.fair[symbol] + k
+                    self._quote(symbol, side, ticks, self.rng.randint(1, 10))
         self.flush()
 
     async def run(self, interval_s: float = 0.5) -> None:
@@ -190,7 +222,7 @@ class SimMarketData:
         elif msg.msg_type == "V":
             self._market_data_request(session, msg)
         else:
-            self._business_reject(session, msg, 3, "Unsupported Message Type")
+            business_reject(session, msg, 3, "Unsupported Message Type")
 
     def _security_list(self, session: SimSession, msg: FixMessage) -> None:
         if msg.get(559) == "4":  # all securities
@@ -220,7 +252,7 @@ class SimMarketData:
         subs = self.subscriptions.setdefault(session.sender, {})
         for symbol in symbols:
             if symbol not in self.books:
-                self._business_reject(session, msg, 2, f"Unknown security {symbol}")
+                business_reject(session, msg, 2, f"Unknown security {symbol}")
             elif sub_type == "2":  # unsubscribe
                 subs.pop(symbol, None)
             else:
@@ -235,16 +267,12 @@ class SimMarketData:
         for o in orders:
             body += [
                 (269, o.side),
-                (270, self._fmt(inst, o.ticks)),
+                (270, self.fmt(symbol, o.ticks)),
                 (271, str(o.qty)),
                 (278, o.order_id),
                 (336, inst.state),
             ]
         session.send("W", body)
-
-    def _business_reject(self, session: SimSession, msg: FixMessage, reason: int, text: str) -> None:
-        ref_id = msg.get(11) or msg.get(262) or msg.get(320) or ""
-        session.send("j", [(45, msg.get(34, "0")), (58, text), (372, msg.msg_type), (379, ref_id), (380, str(reason))])
 
     # ---- helpers ---------------------------------------------------------------------------
 
@@ -257,7 +285,7 @@ class SimMarketData:
                 (269, order.side),
                 (278, order.order_id),
                 (55, symbol),
-                (270, self._fmt(inst, order.ticks)),
+                (270, self.fmt(symbol, order.ticks)),
                 (271, str(0 if action == DELETE else order.qty)),
                 (272, d),
                 (273, t),
@@ -265,6 +293,10 @@ class SimMarketData:
             ]
         )
 
-    @staticmethod
-    def _fmt(inst: SimInstrument, ticks: int) -> str:
-        return f"{ticks * inst.tick:.2f}"
+    def fmt(self, symbol: str, ticks: int) -> str:
+        return f"{ticks * self.instruments[symbol].tick:.2f}"
+
+
+def business_reject(session: SimSession, msg: FixMessage, reason: int, text: str) -> None:
+    ref_id = msg.get(11) or msg.get(262) or msg.get(320) or ""
+    session.send("j", [(45, msg.get(34, "0")), (58, text), (372, msg.msg_type), (379, ref_id), (380, str(reason))])

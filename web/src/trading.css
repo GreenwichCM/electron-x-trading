@@ -1,0 +1,135 @@
+main {
+  max-width: 1280px;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+td.clickable {
+  cursor: pointer;
+}
+td.clickable:hover {
+  outline: 1px solid var(--muted);
+  outline-offset: -1px;
+}
+
+h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+
+.ticket {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+.ticket fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.ticket fieldset:disabled {
+  opacity: 0.45;
+}
+.ticket label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ticket input,
+.ticket select {
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 8px;
+  min-width: 0;
+}
+.ticket .row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.ticket .sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.side.active.buy,
+.submit.buy {
+  background: rgba(76, 195, 157, 0.18);
+  border-color: var(--bid);
+  color: var(--bid);
+}
+.side.active.sell,
+.submit.sell {
+  background: rgba(239, 138, 92, 0.18);
+  border-color: var(--ask);
+  color: var(--ask);
+}
+.submit {
+  font-weight: 600;
+}
+.ticket .note {
+  color: var(--ask);
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+.ok {
+  color: var(--bid);
+  font-size: 13px;
+}
+.ticket .error,
+.blotter .error {
+  font-size: 13px;
+}
+
+.blotter {
+  margin-top: 24px;
+}
+.blotter .text {
+  color: var(--muted);
+  white-space: normal;
+  max-width: 280px;
+}
+.pill {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pill.new,
+.pill.partially_filled {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.pill.filled {
+  color: var(--bid);
+  border-color: var(--bid);
+}
+.pill.rejected {
+  color: var(--ask);
+  border-color: var(--ask);
+}

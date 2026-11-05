@@ -9,6 +9,7 @@ members = [
     "trading-core",
     "trading-fix",
     "trading-marketdata",
+    "trading-orderentry",
     "trading-sim",
 ]
 
@@ -466,6 +467,7 @@ dependencies = [
     { name = "trading-core" },
     { name = "trading-fix" },
     { name = "trading-marketdata" },
+    { name = "trading-orderentry" },
     { name = "trading-sim" },
 ]
 
@@ -483,6 +485,7 @@ requires-dist = [
     { name = "trading-core", editable = "packages/core" },
     { name = "trading-fix", editable = "packages/fix" },
     { name = "trading-marketdata", editable = "services/marketdata" },
+    { name = "trading-orderentry", editable = "services/orderentry" },
     { name = "trading-sim", editable = "packages/sim" },
 ]
 
@@ -500,6 +503,7 @@ version = "0.1.0"
 source = { editable = "services/api" }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx2" },
     { name = "pyjwt" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
@@ -508,6 +512,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.6" },
+    { name = "httpx2", specifier = ">=2.16.0" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "redis", specifier = ">=5.2.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
@@ -544,6 +549,27 @@ requires-dist = [
     { name = "redis", specifier = ">=5.2.1" },
     { name = "trading-core", editable = "packages/core" },
     { name = "trading-fix", editable = "packages/fix" },
+]
+
+[[package]]
+name = "trading-orderentry"
+version = "0.1.0"
+source = { editable = "services/orderentry" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "redis" },
+    { name = "trading-core" },
+    { name = "trading-fix" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115.6" },
+    { name = "redis", specifier = ">=5.2.1" },
+    { name = "trading-core", editable = "packages/core" },
+    { name = "trading-fix", editable = "packages/fix" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
 
 [[package]]

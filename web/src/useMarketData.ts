@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { type Status, useLiveSocket } from "./useLiveSocket";
 
 export type Trade = {
   price: number | null;
@@ -22,59 +23,24 @@ export type Book = {
   time: string;
 };
 
-export type Status = "connecting" | "live" | "disconnected";
-
-const UNAUTHORIZED = 4401;
-
-/** Live books for every symbol, from the api's /ws/md WebSocket. Reconnects on its own.
- *  The first message sent is the login token; if the server rejects it, `onUnauthorized` is called. */
+/** Live books for every symbol, from the api's /ws/md WebSocket. */
 export function useMarketData(
   token: string,
   onUnauthorized: () => void,
 ): { books: Record<string, Book>; status: Status } {
   const [books, setBooks] = useState<Record<string, Book>>({});
-  const [status, setStatus] = useState<Status>("connecting");
-
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let retry = 0;
-    let timer: number | undefined;
-    let closedByUs = false;
-
-    const connect = () => {
-      setStatus("connecting");
-      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${scheme}://${window.location.host}/ws/md`);
-      ws.onopen = () => ws?.send(JSON.stringify({ type: "auth", token }));
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "welcome") {
-          retry = 0;
-          setStatus("live");
-        } else if (msg.type === "book") {
-          setBooks((prev) => ({ ...prev, [msg.data.symbol]: msg.data as Book }));
-        }
-      };
-      ws.onclose = (event) => {
-        if (closedByUs) return;
-        if (event.code === UNAUTHORIZED) {
-          onUnauthorized();
-          return;
-        }
-        setStatus("disconnected");
-        // Prices we hold are no longer live: show them as stale until the server resends them.
-        setBooks((prev) => Object.fromEntries(Object.entries(prev).map(([s, b]) => [s, { ...b, stale: true }])));
-        timer = window.setTimeout(connect, Math.min(1000 * 2 ** retry++, 10000));
-      };
-    };
-
-    connect();
-    return () => {
-      closedByUs = true;
-      window.clearTimeout(timer);
-      ws?.close();
-    };
-  }, [token, onUnauthorized]);
-
+  const status = useLiveSocket(
+    "/ws/md",
+    token,
+    (msg) => {
+      if (msg.type === "book") {
+        const book = msg.data as Book;
+        setBooks((prev) => ({ ...prev, [book.symbol]: book }));
+      }
+    },
+    onUnauthorized,
+    // Prices we hold are no longer live: show them as stale until the server resends them.
+    () => setBooks((prev) => Object.fromEntries(Object.entries(prev).map(([s, b]) => [s, { ...b, stale: true }]))),
+  );
   return { books, status };
 }
