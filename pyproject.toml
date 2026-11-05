@@ -22,6 +22,7 @@ dev = [
     "ruff>=0.14.0",
     "fakeredis>=2.26.2",
     "httpx2>=2.16.0",
+    "honcho>=2.0.0",
 ]
 
 [tool.pytest.ini_options]
