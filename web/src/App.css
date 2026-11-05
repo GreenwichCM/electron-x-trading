@@ -1,0 +1,119 @@
+:root {
+  --bg: #0f1319;
+  --panel: #161b23;
+  --text: #e6ebf2;
+  --muted: #8a96a8;
+  --line: #2a323e;
+  --bid: #4cc39d;
+  --ask: #ef8a5c;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.status {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.status.live {
+  color: var(--bid);
+  border-color: var(--bid);
+}
+.status.connecting {
+  color: var(--muted);
+}
+.status.disconnected {
+  color: var(--ask);
+  border-color: var(--ask);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  font-size: 14px;
+}
+
+th,
+td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+}
+
+.symbol {
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+}
+
+.qty,
+.time {
+  color: var(--muted);
+}
+
+.buy {
+  color: var(--bid);
+}
+.sell {
+  color: var(--ask);
+}
+
+.up {
+  background: rgba(76, 195, 157, 0.25);
+  transition: background 0.6s;
+}
+.down {
+  background: rgba(239, 138, 92, 0.25);
+  transition: background 0.6s;
+}
+
+tr.stale td {
+  opacity: 0.4;
+}
+
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 32px;
+}

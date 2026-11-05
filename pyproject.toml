@@ -3,7 +3,7 @@ name = "trading"
 version = "0.1.0"
 description = "ElectronX trading platform (workspace root)"
 requires-python = ">=3.14"
-dependencies = ["trading-core", "trading-fix", "trading-sim", "trading-marketdata"]
+dependencies = ["trading-core", "trading-fix", "trading-sim", "trading-marketdata", "trading-api"]
 
 [tool.uv.workspace]
 members = ["packages/*", "services/*"]
@@ -13,12 +13,14 @@ trading-core = { workspace = true }
 trading-fix = { workspace = true }
 trading-sim = { workspace = true }
 trading-marketdata = { workspace = true }
+trading-api = { workspace = true }
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.14.0",
     "fakeredis>=2.26.2",
+    "httpx2>=2.16.0",
 ]
 
 [tool.pytest.ini_options]

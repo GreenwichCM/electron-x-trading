@@ -1,0 +1,14 @@
+[project]
+name = "trading-api"
+version = "0.1.0"
+description = "HTTP and WebSocket API for the trading UI and risk dashboard"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115.6",
+    "uvicorn[standard]>=0.34.0",
+    "redis>=5.2.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
