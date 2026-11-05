@@ -3,24 +3,26 @@ name = "trading"
 version = "0.1.0"
 description = "ElectronX trading platform (workspace root)"
 requires-python = ">=3.14"
-dependencies = ["trading-core", "trading-fix", "trading-sim"]
+dependencies = ["trading-core", "trading-fix", "trading-sim", "trading-marketdata"]
 
 [tool.uv.workspace]
-members = ["packages/*"]
+members = ["packages/*", "services/*"]
 
 [tool.uv.sources]
 trading-core = { workspace = true }
 trading-fix = { workspace = true }
 trading-sim = { workspace = true }
+trading-marketdata = { workspace = true }
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.14.0",
+    "fakeredis>=2.26.2",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["packages"]
+testpaths = ["packages", "services"]
 addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
