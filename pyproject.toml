@@ -1,0 +1,28 @@
+[project]
+name = "trading"
+version = "0.1.0"
+description = "ElectronX trading platform (workspace root)"
+requires-python = ">=3.14"
+dependencies = ["trading-core"]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+trading-core = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.14.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+addopts = ["--import-mode=importlib"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
