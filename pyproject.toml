@@ -3,13 +3,15 @@ name = "trading"
 version = "0.1.0"
 description = "ElectronX trading platform (workspace root)"
 requires-python = ">=3.14"
-dependencies = ["trading-core"]
+dependencies = ["trading-core", "trading-fix", "trading-sim"]
 
 [tool.uv.workspace]
 members = ["packages/*"]
 
 [tool.uv.sources]
 trading-core = { workspace = true }
+trading-fix = { workspace = true }
+trading-sim = { workspace = true }
 
 [dependency-groups]
 dev = [

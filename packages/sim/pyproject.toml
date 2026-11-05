@@ -1,0 +1,13 @@
+[project]
+name = "trading-sim"
+version = "0.1.0"
+description = "Local stand-in for the ElectronX gateways, for tests and development"
+requires-python = ">=3.14"
+dependencies = ["trading-fix"]
+
+[tool.uv.sources]
+trading-fix = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
