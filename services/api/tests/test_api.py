@@ -3,46 +3,100 @@ coroutine inside that loop, which is how the tests write to Redis while the app 
 
 import json
 
+import pytest
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
-from trading_api import Settings, create_app
+from starlette.websockets import WebSocketDisconnect
+from trading_api import Settings, User, create_app
 
 SYMBOL = "BFUT500-ERCOT-HB_NORTH-261231-15"
+SETTINGS = Settings(dev_login=True, dev_secret="test-secret-" + "x" * 32)
 
 
 def book(bid, ask, symbol=SYMBOL):
     return {"symbol": symbol, "stale": False, "bid": bid, "ask": ask}
 
 
-def make_app():
+def make_app(**kwargs):
     redis = FakeAsyncRedis()
-    return redis, create_app(redis=redis, settings=Settings())
+    return redis, create_app(redis=redis, settings=SETTINGS, **kwargs)
 
 
-def test_health():
+def login(client, user_id="alice"):
+    token = client.post("/api/dev/login", json={"user_id": user_id}).json()["token"]
+    return token, {"Authorization": f"Bearer {token}"}
+
+
+def test_health_needs_no_login():
     _, app = make_app()
     with TestClient(app) as client:
         assert client.get("/api/health").json() == {"status": "ok"}
 
 
+def test_everything_else_needs_a_valid_token():
+    _, app = make_app()
+    with TestClient(app) as client:
+        assert client.get("/api/me").status_code == 401
+        assert client.get("/api/instruments").status_code == 401
+        assert client.get("/api/me", headers={"Authorization": "Bearer forged"}).status_code == 401
+
+
+def test_me_shows_role_permissions():
+    _, app = make_app()
+    with TestClient(app) as client:
+        _, headers = login(client, "bob")
+        me = client.get("/api/me", headers=headers).json()
+        assert me["id"] == "bob" and me["roles"] == ["risk"]
+        assert "killswitch.trip" in me["permissions"] and "orders.trade" not in me["permissions"]
+
+
+def test_unknown_test_user_cannot_log_in():
+    _, app = make_app()
+    with TestClient(app) as client:
+        assert client.post("/api/dev/login", json={"user_id": "mallory"}).status_code == 404
+
+
+def test_missing_permission_is_forbidden():
+    class NoMarketData:
+        def authenticate(self, token):
+            return User("dave", "Dave", ("nobody",))
+
+    _, app = make_app(authenticator=NoMarketData())
+    with TestClient(app) as client:
+        assert client.get("/api/instruments", headers={"Authorization": "Bearer t"}).status_code == 403
+
+
 def test_instruments_and_latest_book():
     redis, app = make_app()
     with TestClient(app) as client:
+        _, headers = login(client)
         client.portal.call(redis.set, f"instrument:{SYMBOL}", json.dumps({"symbol": SYMBOL, "tick_size": 0.25}))
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book(40.0, 40.5)))
-        assert client.get("/api/instruments").json() == [{"symbol": SYMBOL, "tick_size": 0.25}]
-        assert client.get(f"/api/md/{SYMBOL}").json()["bid"] == 40.0
-        assert client.get("/api/md/NOPE").status_code == 404
+        assert client.get("/api/instruments", headers=headers).json() == [{"symbol": SYMBOL, "tick_size": 0.25}]
+        assert client.get(f"/api/md/{SYMBOL}", headers=headers).json()["bid"] == 40.0
+        assert client.get("/api/md/NOPE", headers=headers).status_code == 404
+
+
+def test_websocket_rejects_a_bad_token():
+    _, app = make_app()
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/md") as ws:
+            ws.send_json({"type": "auth", "token": "forged"})
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 4401
 
 
 def test_websocket_sends_latest_then_live_updates():
     redis, app = make_app()
     with TestClient(app) as client:
+        token, _ = login(client)
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book(40.0, 40.5)))
         client.portal.call(app.state.hub.ready.wait)
         with client.websocket_connect("/ws/md") as ws:
-            first = ws.receive_json()
-            assert first == {"type": "book", "data": book(40.0, 40.5)}
+            ws.send_json({"type": "auth", "token": token})
+            assert ws.receive_json()["user"]["id"] == "alice"
+            assert ws.receive_json() == {"type": "book", "data": book(40.0, 40.5)}
             client.portal.call(redis.publish, f"md.{SYMBOL}", json.dumps(book(40.25, 40.5)))
             assert ws.receive_json()["data"]["bid"] == 40.25
 
@@ -50,8 +104,12 @@ def test_websocket_sends_latest_then_live_updates():
 def test_each_browser_gets_its_own_feed():
     redis, app = make_app()
     with TestClient(app) as client:
+        token, _ = login(client)
         client.portal.call(app.state.hub.ready.wait)
         with client.websocket_connect("/ws/md") as a, client.websocket_connect("/ws/md") as b:
+            for ws in (a, b):
+                ws.send_json({"type": "auth", "token": token})
+                assert ws.receive_json()["type"] == "welcome"
             client.portal.call(redis.publish, f"md.{SYMBOL}", json.dumps(book(41.0, 41.5)))
             assert a.receive_json()["data"]["bid"] == 41.0
             assert b.receive_json()["data"]["bid"] == 41.0

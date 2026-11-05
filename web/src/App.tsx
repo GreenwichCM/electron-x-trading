@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, clearToken, getToken, Unauthorized, type User } from "./auth";
+import Login from "./Login";
 import { type Book, useMarketData } from "./useMarketData";
 
 const fmtPrice = (v: number | null | undefined) => (v == null ? "" : v.toFixed(2));
@@ -38,14 +40,22 @@ function Row({ book }: { book: Book }) {
   );
 }
 
-export default function App() {
-  const { books, status } = useMarketData();
+function Prices({ user, token, onSignOut }: { user: User; token: string; onSignOut: () => void }) {
+  const { books, status } = useMarketData(token, onSignOut);
   const rows = Object.values(books).sort((a, b) => a.symbol.localeCompare(b.symbol));
   return (
     <main>
       <header>
         <h1>ElectronX prices</h1>
         <span className={`status ${status}`}>{status}</span>
+        <div className="spacer" />
+        <div className="user">
+          <strong>{user.name}</strong>
+          <span>{user.roles.join(", ")}</span>
+        </div>
+        <button className="link" onClick={onSignOut}>
+          Sign out
+        </button>
       </header>
       <table>
         <thead>
@@ -73,6 +83,43 @@ export default function App() {
           )}
         </tbody>
       </table>
+      <section className="permissions">
+        <h2>Your permissions</h2>
+        <div className="chips">
+          {user.permissions.map((p) => (
+            <code key={p}>{p}</code>
+          ))}
+        </div>
+      </section>
     </main>
   );
+}
+
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  // A token left in this tab from before: check it is still valid.
+  useEffect(() => {
+    if (!getToken()) {
+      setChecking(false);
+      return;
+    }
+    api<User>("/api/me")
+      .then(setUser)
+      .catch((e) => {
+        if (e instanceof Unauthorized) clearToken();
+      })
+      .finally(() => setChecking(false));
+  }, []);
+
+  const signOut = useCallback(() => {
+    clearToken();
+    setUser(null);
+  }, []);
+
+  if (checking) return null;
+  const token = getToken();
+  if (!user || !token) return <Login onLogin={setUser} />;
+  return <Prices user={user} token={token} onSignOut={signOut} />;
 }

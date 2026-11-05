@@ -1,0 +1,90 @@
+.spacer {
+  flex: 1;
+}
+
+.user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 13px;
+}
+.user span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+button:hover {
+  border-color: var(--muted);
+}
+button:focus-visible {
+  outline: 2px solid var(--bid);
+  outline-offset: 2px;
+}
+button.link {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 4px 8px;
+}
+button.link:hover {
+  color: var(--text);
+}
+
+.login {
+  max-width: 420px;
+  padding-top: 80px;
+}
+.login .hint {
+  color: var(--muted);
+  margin: 8px 0 24px;
+}
+.users {
+  display: grid;
+  gap: 10px;
+}
+.users button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-align: left;
+}
+.users button span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.error {
+  color: var(--ask);
+}
+
+.permissions {
+  margin-top: 24px;
+}
+.permissions h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chips code {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+}
