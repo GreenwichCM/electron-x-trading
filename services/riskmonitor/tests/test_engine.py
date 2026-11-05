@@ -1,0 +1,96 @@
+import asyncio
+import json
+
+from fakeredis import FakeAsyncRedis
+from trading_core import BLOCKS_KEY, decode_blocks
+from trading_riskmonitor import SNAPSHOT_KEY, Limits, RiskEngine, follow_streams, publish
+
+X, Y = "BFUT500-ERCOT-HB_NORTH-261231-15", "BFUT100-PJM-WESTERN_HUB-261231-15"
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1_000.0
+
+    def __call__(self):
+        return self.now
+
+
+def order(cl, trader):
+    return {"cl_ord_id": cl, "trader": trader}
+
+
+def fill(exec_id, cl, side, qty, price, symbol=X):
+    return {"exec_id": exec_id, "cl_ord_id": cl, "symbol": symbol, "side": side, "qty": qty, "price": price}
+
+
+def book(bid, ask, symbol=X):
+    return {"symbol": symbol, "bid": bid, "ask": ask, "stale": False, "last_trade": None}
+
+
+def test_pnl_per_trader_and_for_the_desk():
+    e = RiskEngine(Limits(max_loss=1000, max_position=10), clock=Clock())
+    e.on_order(order("A1", "alice"))
+    e.on_order(order("D1", "dave"))
+    e.on_fill(fill("E1", "A1", "BUY", 2, 40.0))
+    e.on_fill(fill("E2", "D1", "SELL", 1, 41.0))
+    e.on_book(book(42.0, 43.0))  # mark 42.5
+    snap = e.snapshot()
+    alice, dave = snap["traders"]["alice"], snap["traders"]["dave"]
+    assert alice["positions"][X]["qty"] == 2 and alice["unrealized"] == 5.0  # 2 x (42.5 - 40)
+    assert dave["unrealized"] == -1.5  # short 1 from 41, now 42.5
+    assert snap["desk"]["total"] == 3.5 and snap["desk"]["positions"] == {X: 1}
+    assert alice["positions"][X]["mark_source"] == "mid" and alice["limits"]["position"]["pct"] == 20.0
+
+
+def test_fills_wait_for_their_order_and_duplicates_count_once():
+    e = RiskEngine(clock=Clock())
+    e.on_fill(fill("E1", "A1", "BUY", 1, 40.0))  # the fill arrived before orderentry's update
+    e.on_fill(fill("E1", "A1", "BUY", 1, 40.0))  # and again, resent
+    assert e.snapshot()["traders"] == {} and e.snapshot()["unattributed_fills"] == 1
+    e.on_order(order("A1", "alice"))
+    assert e.snapshot()["traders"]["alice"]["positions"][X]["qty"] == 1
+
+
+def test_loss_limit_breach():
+    e = RiskEngine(Limits(max_loss=10), clock=Clock())
+    e.on_order(order("A1", "alice"))
+    e.on_fill(fill("E1", "A1", "BUY", 2, 50.0))
+    e.on_book(book(44.0, 45.0))  # mark 44.5: loss 11
+    snap = e.snapshot()
+    assert snap["traders"]["alice"]["limits"]["loss"]["pct"] == 110.0
+    assert "reached the limit" in e.breaches(snap)["alice"]
+
+
+def test_mark_age_is_reported():
+    clock = Clock()
+    e = RiskEngine(clock=clock)
+    e.on_order(order("A1", "alice"))
+    e.on_fill(fill("E1", "A1", "BUY", 1, 40.0, symbol=Y))
+    e.on_book(book(40.0, 41.0, symbol=Y))
+    clock.now += 12
+    assert e.snapshot()["traders"]["alice"]["positions"][Y]["mark_age_s"] == 12.0
+
+
+def test_streams_snapshot_and_automatic_block_through_redis():
+    async def scenario():
+        r = FakeAsyncRedis()
+        await r.xadd("orders", {"data": json.dumps(order("A1", "alice"))})
+        await r.xadd("fills", {"data": json.dumps(fill("E1", "A1", "BUY", 2, 50.0))})
+        e = RiskEngine(Limits(max_loss=10))
+        e.on_book(book(44.0, 45.0))
+        tasks = [asyncio.create_task(follow_streams(r, e)), asyncio.create_task(publish(r, e, every_s=0.05))]
+        for _ in range(100):
+            if await r.hget(BLOCKS_KEY, "alice"):
+                break
+            await asyncio.sleep(0.02)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        snap = json.loads(await r.get(SNAPSHOT_KEY))
+        assert snap["traders"]["alice"]["total"] == -11.0
+        blocks = decode_blocks(await r.hgetall(BLOCKS_KEY))
+        assert blocks["alice"].by == "riskmonitor" and "loss" in blocks["alice"].reason
+        assert len(await r.xrange("alerts")) == 1  # blocked once, not once per second
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))

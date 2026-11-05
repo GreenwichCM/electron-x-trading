@@ -11,6 +11,7 @@ members = [
     "trading-fix",
     "trading-marketdata",
     "trading-orderentry",
+    "trading-riskmonitor",
     "trading-sim",
 ]
 
@@ -482,6 +483,7 @@ dependencies = [
     { name = "trading-fix" },
     { name = "trading-marketdata" },
     { name = "trading-orderentry" },
+    { name = "trading-riskmonitor" },
     { name = "trading-sim" },
 ]
 
@@ -502,6 +504,7 @@ requires-dist = [
     { name = "trading-fix", editable = "packages/fix" },
     { name = "trading-marketdata", editable = "services/marketdata" },
     { name = "trading-orderentry", editable = "services/orderentry" },
+    { name = "trading-riskmonitor", editable = "services/riskmonitor" },
     { name = "trading-sim", editable = "packages/sim" },
 ]
 
@@ -606,6 +609,21 @@ requires-dist = [
     { name = "trading-core", editable = "packages/core" },
     { name = "trading-fix", editable = "packages/fix" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
+]
+
+[[package]]
+name = "trading-riskmonitor"
+version = "0.1.0"
+source = { editable = "services/riskmonitor" }
+dependencies = [
+    { name = "redis" },
+    { name = "trading-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "redis", specifier = ">=5.2.1" },
+    { name = "trading-core", editable = "packages/core" },
 ]
 
 [[package]]

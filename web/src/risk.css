@@ -56,3 +56,64 @@ button.resume {
 .positions tr.break td {
   background: rgba(239, 138, 92, 0.12);
 }
+
+.risk {
+  margin-top: 24px;
+}
+.risk h2.sub {
+  margin-top: 18px;
+}
+.risk .usage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 140px;
+}
+.risk .bar {
+  flex: 1;
+  height: 6px;
+  background: var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.risk .fill {
+  height: 100%;
+}
+.risk .fill.ok {
+  background: var(--bid);
+}
+.risk .fill.near {
+  background: #e3b341;
+}
+.risk .fill.over {
+  background: var(--ask);
+}
+.risk .usage span {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.risk tr.blocked td {
+  background: rgba(239, 138, 92, 0.1);
+}
+.risk .reason {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+  white-space: normal;
+}
+.risk tr.desk td {
+  font-weight: 600;
+  border-top: 1px solid var(--muted);
+}
+.risk .stale-mark {
+  color: #e3b341;
+}
+button.link.block {
+  color: var(--ask);
+}
+button.link.unblock {
+  color: var(--bid);
+}

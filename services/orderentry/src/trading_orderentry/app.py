@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping
 from decimal import Decimal
 
-from trading_core import KillSwitchState
+from trading_core import KillSwitchState, TraderBlock
 from trading_fix import FixMessage, FixSession, SessionError, utc_timestamp
 
 from .orders import FROM_ORD_STATUS, SIDE_TO_FIX, TIF_TO_FIX, Order, Status, now_iso
@@ -57,6 +57,7 @@ class OrderEntryApp:
         self._cancel_ids: dict[str, str] = {}  # cancel request ClOrdID -> order ClOrdID
         self._before_cancel: dict[str, Status] = {}
         self.kill_switch = KillSwitchState()
+        self.blocks: dict[str, TraderBlock] = {}  # trader -> why they may not trade
         self._ids = itertools.count(1)
         self._id_prefix = f"T{int(time.time()):x}"
 
@@ -106,6 +107,26 @@ class OrderEntryApp:
         if state.active and self._logged_on():
             for order in list(self.orders.values()):
                 if order.live and order.status != Status.PENDING_CANCEL:
+                    if not self.throttle.allow(is_cancel=True):
+                        return  # the rest go out on the next call
+                    self._send_cancel(order)
+
+    def set_blocks(self, blocks: Mapping[str, TraderBlock]) -> None:
+        """Called with the current trader blocks about once a second. A blocked trader's new orders are
+        rejected and their live orders cancelled, the same way the kill switch does for everyone."""
+        for trader in blocks.keys() - self.blocks.keys():
+            log.critical(
+                "trader %s BLOCKED (%s by %s): cancelling their orders",
+                trader,
+                blocks[trader].reason,
+                blocks[trader].by,
+            )
+        for trader in self.blocks.keys() - blocks.keys():
+            log.warning("trader %s unblocked", trader)
+        self.blocks = dict(blocks)
+        if blocks and self._logged_on():
+            for order in list(self.orders.values()):
+                if order.trader in blocks and order.live and order.status != Status.PENDING_CANCEL:
                     if not self.throttle.allow(is_cancel=True):
                         return  # the rest go out on the next call
                     self._send_cancel(order)
@@ -201,6 +222,9 @@ class OrderEntryApp:
     def _precheck(self, order: Order) -> str | None:
         if self.kill_switch.active:
             return f"trading is halted (kill switch: {self.kill_switch.reason})"
+        block = self.blocks.get(order.trader)
+        if block is not None:
+            return f"you are blocked from trading: {block.reason}"
         if order.side not in SIDE_TO_FIX:
             return f"side must be BUY or SELL, not {order.side}"
         if order.tif not in TIF_TO_FIX:

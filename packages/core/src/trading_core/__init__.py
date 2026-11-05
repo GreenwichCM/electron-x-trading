@@ -11,11 +11,12 @@ from .instruments import (
     Product,
     Symbol,
 )
-from .killswitch import ALERTS_STREAM, KillSwitchState
+from .killswitch import ALERTS_STREAM, BLOCKS_KEY, KillSwitchState, TraderBlock, decode_blocks
 from .killswitch import KEY as KILLSWITCH_KEY
 
 __all__ = [
     "ALERTS_STREAM",
+    "BLOCKS_KEY",
     "DATA_START_DATE",
     "KILLSWITCH_KEY",
     "LOT_SIZE_MWH",
@@ -27,4 +28,6 @@ __all__ = [
     "Market",
     "Product",
     "Symbol",
+    "TraderBlock",
+    "decode_blocks",
 ]

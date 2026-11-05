@@ -11,7 +11,7 @@ import sys
 import uvicorn
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from trading_core import KILLSWITCH_KEY, KillSwitchState
+from trading_core import BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, decode_blocks
 from trading_fix import AlreadyRunning, FixSession, SeqStore, build_ssl_context, lock_state_dir
 
 from .app import OrderEntryApp
@@ -38,12 +38,14 @@ async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 
 
 
 async def watch_kill_switch(redis: Redis, oe: OrderEntryApp, every_s: float = 0.5) -> None:
-    """Follow the kill switch in Redis. If Redis is unreachable the last known state is kept."""
+    """Follow the kill switch and the trader blocks in Redis. If Redis is unreachable the last known
+    state is kept."""
     while True:
         try:
             oe.set_kill_switch(KillSwitchState.from_json(await redis.get(KILLSWITCH_KEY)))
+            oe.set_blocks(decode_blocks(await redis.hgetall(BLOCKS_KEY)))
         except (RedisError, OSError) as exc:
-            log.warning("could not read the kill switch: %s", exc)
+            log.warning("could not read the kill switch or trader blocks: %s", exc)
         await asyncio.sleep(every_s)
 
 

@@ -16,7 +16,7 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from trading_core import ALERTS_STREAM, KILLSWITCH_KEY, KillSwitchState
+from trading_core import ALERTS_STREAM, BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, TraderBlock, decode_blocks
 
 from .auth import Authenticator, DevAuthenticator, User
 from .hub import ClientFeed, MarketDataHub
@@ -48,7 +48,13 @@ class KillSwitchRequest(BaseModel):
     reason: str = ""
 
 
+class BlockRequest(BaseModel):
+    blocked: bool
+    reason: str = ""
+
+
 DC_POSITIONS_KEY = "dc:positions"
+RISK_SNAPSHOT_KEY = "risk:snapshot"
 
 
 def create_app(
@@ -208,6 +214,55 @@ def create_app(
             "exchange_time": dc["time"],
             "by_trader": by_trader,
         }
+
+    @app.get("/api/risk")
+    async def risk(user: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
+        """riskmonitor's snapshot, cut down to what `user` may see.
+
+        risk.view.all: every trader. risk.view.own: only their own entry, plus the desk's totals (never
+        other traders' rows) if they also have risk.view.desk_aggregate.
+        """
+        if not (user.can("risk.view.all") or user.can("risk.view.own")):
+            raise HTTPException(status_code=403, detail="missing permission risk.view.own")
+        raw = await app.state.redis.get(RISK_SNAPSHOT_KEY)
+        snap = json.loads(raw) if raw else {"time": "", "traders": {}, "desk": None, "unattributed_fills": 0}
+        blocks = decode_blocks(await app.state.redis.hgetall(BLOCKS_KEY))
+        for trader in blocks:  # a blocked trader with no positions still gets a row
+            snap["traders"].setdefault(trader, {"positions": {}, "realized": 0.0, "unrealized": 0.0, "total": 0.0})
+        for trader, entry in snap["traders"].items():
+            entry["blocked"] = block_dict(blocks[trader]) if trader in blocks else None
+        if user.can("risk.view.all"):
+            return snap
+        own = snap["traders"].get(user.id)
+        desk = snap.get("desk") if user.can("risk.view.desk_aggregate") else None
+        return {"time": snap["time"], "traders": {user.id: own} if own else {}, "desk": desk}
+
+    def block_dict(block: TraderBlock) -> dict[str, str]:
+        return {"reason": block.reason, "by": block.by, "time": block.time}
+
+    @app.post("/api/risk/blocks/{trader}")
+    async def set_block(
+        trader: str, body: BlockRequest, user: Annotated[User, Depends(require("killswitch.trip"))]
+    ) -> dict[str, Any]:
+        """Block one trader (no new orders, live orders cancelled) or lift the block."""
+        if body.blocked and not body.reason.strip():
+            raise HTTPException(status_code=400, detail="give a reason for blocking")
+        now = datetime.now(UTC).isoformat(timespec="milliseconds")
+        if body.blocked:
+            block = TraderBlock(reason=body.reason.strip(), by=user.id, time=now)
+            await app.state.redis.hset(BLOCKS_KEY, trader, block.to_json())
+        else:
+            await app.state.redis.hdel(BLOCKS_KEY, trader)
+        alert = {
+            "type": "trader_blocked" if body.blocked else "trader_unblocked",
+            "trader": trader,
+            "reason": body.reason.strip(),
+            "by": user.id,
+            "time": now,
+        }
+        await app.state.redis.xadd(ALERTS_STREAM, {"data": json.dumps(alert)}, maxlen=10_000)
+        log.warning("%s %s by %s: %s", trader, "blocked" if body.blocked else "unblocked", user.id, body.reason)
+        return {"trader": trader, "blocked": body.blocked}
 
     # ---- WebSockets ------------------------------------------------------------------------
 

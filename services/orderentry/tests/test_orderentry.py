@@ -5,7 +5,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
-from trading_core import KillSwitchState
+from trading_core import KillSwitchState, TraderBlock
 from trading_fix import FixSession, SeqStore, SessionConfig
 from trading_orderentry import (
     Instrument,
@@ -187,6 +187,24 @@ def test_kill_switch_stops_trading_and_cancels_everything():
             blocked = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
             assert blocked.status == Status.REJECTED and "halted" in blocked.text and "position break" in blocked.text
             h.oe.set_kill_switch(KillSwitchState(active=False, by="bob"))
+            again = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            await wait_for(lambda: again.status == Status.NEW)
+
+    run(scenario())
+
+
+def test_a_blocked_trader_cannot_trade_and_their_orders_are_cancelled():
+    async def scenario():
+        async with Harness() as h:
+            alice = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            dave = h.oe.submit("dave", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            await wait_for(lambda: alice.status == Status.NEW and dave.status == Status.NEW)
+            h.oe.set_blocks({"alice": TraderBlock(reason="loss limit", by="riskmonitor", time="t")})
+            await wait_for(lambda: alice.status == Status.CANCELED)
+            assert dave.status == Status.NEW  # only alice is affected
+            blocked = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            assert blocked.status == Status.REJECTED and "blocked" in blocked.text and "loss limit" in blocked.text
+            h.oe.set_blocks({})
             again = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
             await wait_for(lambda: again.status == Status.NEW)
 

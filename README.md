@@ -13,6 +13,7 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 | `services/marketdata` | MD session -> order books -> Redis |
 | `services/orderentry` | Pre-trade risk, throttle, OE session, internal order endpoint, kill switch |
 | `services/dropcopy` | The exchange's copy of every fill: positions, break detection, kill switch trip |
+| `services/riskmonitor` | Marks, P&L and limit usage per trader; blocks a trader who hits the loss limit |
 | `services/api` | FastAPI: login, permissions, REST and WebSockets for the web app |
 | `web` | React + TypeScript trading UI |
 
@@ -40,7 +41,7 @@ Positions, sequence numbers and order history live in `var/` and in Redis. To wi
 (development only), stop everything, then:
 
     rm -rf var
-    docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions
+    docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions risk:snapshot risk:blocked
 
 ## Tests
 
