@@ -10,23 +10,27 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 | `packages/core` | Shared definitions: markets, products, symbols |
 | `packages/fix` | FIX session layer (logon, heartbeats, sequence numbers, resend, mutual TLS) |
 | `packages/sim` | Simulated ElectronX gateways for tests and development |
+| `packages/db` | SQL Server settings, connections and schema migrations |
 | `services/marketdata` | MD session -> order books -> Redis |
 | `services/orderentry` | Pre-trade risk, throttle, OE session, internal order endpoint, kill switch |
 | `services/dropcopy` | The exchange's copy of every fill: positions, break detection, kill switch trip |
 | `services/riskmonitor` | Marks, P&L and limit usage per trader; blocks a trader who hits the loss limit |
+| `services/recorder` | Copies orders, fills and alerts from Redis into SQL Server, permanently |
 | `services/api` | FastAPI: login, permissions, REST and WebSockets for the web app |
 | `web` | React + TypeScript trading UI |
 
 ## First-time setup (WSL)
 
 Copy each `.env.example` to `.env` next to it and fill in the secrets (see the comments in each file).
-`services/api/.env` and `services/orderentry/.env` must have the same `OE_INTERNAL_TOKEN`.
+`services/api/.env` and `services/orderentry/.env` must have the same `OE_INTERNAL_TOKEN`;
+`services/recorder/.env` has the same `DB_PASSWORD` as `MSSQL_SA_PASSWORD` in `.env`.
 
 Only one copy of orderentry and of dropcopy may run at a time; a second one refuses to start.
 
     uv sync
     npm --prefix web install
-    docker compose up -d redis
+    docker compose up -d
+    uv run --env-file services/recorder/.env python -m trading_db migrate
 
 ## Run everything
 
@@ -43,6 +47,15 @@ exchange resends whatever happened while it was down. Orders still live from bef
 sequence reset (Sunday 06:15 UTC) are cancelled, because what happened to them cannot be confirmed.
 The simulator keeps resting orders across its own restarts, like the exchange.
 
+## History in SQL Server
+
+The recorder copies every order update, fill and alert into the `trading` database. Redis keeps only
+the latest entries; SQL Server keeps everything. Schema changes are numbered files in
+`packages/db/src/trading_db/migrations`, applied by the `migrate` command above (`status` lists them).
+
+    docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -U sa -P "$(grep MSSQL_SA_PASSWORD .env | cut -d= -f2-)" \
+        -d trading -Q "SELECT TOP 10 exec_time, trader, symbol, side, qty, price FROM dbo.trader_fills ORDER BY exec_time DESC"
+
 ## Start again from a clean slate
 
 Positions, sequence numbers and order history live in `var/` and in Redis. To wipe them all
@@ -51,8 +64,14 @@ Positions, sequence numbers and order history live in `var/` and in Redis. To wi
     rm -rf var
     docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions risk:snapshot risk:blocked
 
+This keeps the history in SQL Server. To wipe that too: `docker compose down -v`, `docker compose up -d`,
+then run `migrate` again.
+
 ## Tests
 
     uv run pytest
     uv run ruff check && uv run ruff format --check
     npm --prefix web run build
+
+Tests that need SQL Server use the one from `docker compose up -d` (each in its own temporary
+database) and are skipped when it is not running.

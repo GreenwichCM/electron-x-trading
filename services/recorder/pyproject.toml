@@ -1,0 +1,16 @@
+[project]
+name = "trading-recorder"
+version = "0.1.0"
+description = "Recorder: copies the order, fill and alert streams from Redis into SQL Server"
+requires-python = ">=3.14"
+dependencies = [
+    "trading-db",
+    "redis>=5.2.1",
+]
+
+[tool.uv.sources]
+trading-db = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"

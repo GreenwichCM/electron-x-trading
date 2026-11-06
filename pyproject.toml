@@ -3,7 +3,18 @@ name = "trading"
 version = "0.1.0"
 description = "ElectronX trading platform (workspace root)"
 requires-python = ">=3.14"
-dependencies = ["trading-core", "trading-fix", "trading-sim", "trading-marketdata", "trading-api", "trading-orderentry", "trading-dropcopy", "trading-riskmonitor"]
+dependencies = [
+    "trading-core",
+    "trading-fix",
+    "trading-sim",
+    "trading-db",
+    "trading-marketdata",
+    "trading-api",
+    "trading-orderentry",
+    "trading-dropcopy",
+    "trading-riskmonitor",
+    "trading-recorder",
+]
 
 [tool.uv.workspace]
 members = ["packages/*", "services/*"]
@@ -12,11 +23,13 @@ members = ["packages/*", "services/*"]
 trading-core = { workspace = true }
 trading-fix = { workspace = true }
 trading-sim = { workspace = true }
+trading-db = { workspace = true }
 trading-marketdata = { workspace = true }
 trading-api = { workspace = true }
 trading-orderentry = { workspace = true }
 trading-dropcopy = { workspace = true }
 trading-riskmonitor = { workspace = true }
+trading-recorder = { workspace = true }
 
 [dependency-groups]
 dev = [
