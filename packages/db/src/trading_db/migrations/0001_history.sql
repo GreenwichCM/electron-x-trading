@@ -1,16 +1,16 @@
 -- Order, fill and alert history, copied from the Redis streams by the recorder service.
--- Everything is in the `trading` schema (migrate creates it), so the database can be shared.
+-- Everything is in the `electronx` schema (migrate creates it), so the database can be shared.
 -- Times are UTC. Prices are USD/MWh, quantities are lots.
 
 -- How far the recorder has got in each Redis stream (written in the same transaction as the rows).
-CREATE TABLE trading.stream_offsets (
+CREATE TABLE electronx.stream_offsets (
     stream     varchar(64)  NOT NULL PRIMARY KEY,
     last_id    varchar(32)  NOT NULL,  -- Redis entry id, e.g. 1762397762069-0
     updated_at datetime2(3) NOT NULL DEFAULT sysutcdatetime()
 );
 
 -- Every update orderentry published: the whole life of each order.
-CREATE TABLE trading.order_events (
+CREATE TABLE electronx.order_events (
     stream_id   varchar(32)   NOT NULL PRIMARY KEY,
     cl_ord_id   varchar(64)   NOT NULL,
     version     int           NOT NULL,
@@ -29,10 +29,10 @@ CREATE TABLE trading.order_events (
     updated_at  datetime2(3)  NULL,
     recorded_at datetime2(3)  NOT NULL DEFAULT sysutcdatetime()
 );
-CREATE INDEX ix_order_events_order ON trading.order_events (cl_ord_id, version);
+CREATE INDEX ix_order_events_order ON electronx.order_events (cl_ord_id, version);
 
 -- The latest state of each order (its highest version).
-CREATE TABLE trading.orders (
+CREATE TABLE electronx.orders (
     cl_ord_id      varchar(64)   NOT NULL PRIMARY KEY,
     version        int           NOT NULL,
     trader         nvarchar(128) NOT NULL,
@@ -50,10 +50,10 @@ CREATE TABLE trading.orders (
     updated_at     datetime2(3)  NULL,
     last_stream_id varchar(32)   NOT NULL
 );
-CREATE INDEX ix_orders_trader ON trading.orders (trader, created_at);
+CREATE INDEX ix_orders_trader ON electronx.orders (trader, created_at);
 
 -- The exchange's fills, from drop copy (they carry the ClOrdID, not the trader: see trader_fills).
-CREATE TABLE trading.fills (
+CREATE TABLE electronx.fills (
     exec_id     varchar(64)   NOT NULL PRIMARY KEY,
     stream_id   varchar(32)   NOT NULL,
     order_id    varchar(64)   NOT NULL,
@@ -66,11 +66,11 @@ CREATE TABLE trading.fills (
     exec_time   datetime2(3)  NULL,  -- TransactTime(60)
     recorded_at datetime2(3)  NOT NULL DEFAULT sysutcdatetime()
 );
-CREATE INDEX ix_fills_symbol_time ON trading.fills (symbol, exec_time);
-CREATE INDEX ix_fills_order ON trading.fills (cl_ord_id);
+CREATE INDEX ix_fills_symbol_time ON electronx.fills (symbol, exec_time);
+CREATE INDEX ix_fills_order ON electronx.fills (cl_ord_id);
 
 -- Kill switch changes and trader blocks.
-CREATE TABLE trading.alerts (
+CREATE TABLE electronx.alerts (
     stream_id   varchar(32)   NOT NULL PRIMARY KEY,
     type        varchar(40)   NOT NULL,  -- killswitch_on, killswitch_off, trader_blocked, trader_unblocked
     trader      nvarchar(128) NULL,      -- for trader blocks
@@ -80,11 +80,11 @@ CREATE TABLE trading.alerts (
     data        nvarchar(max) NOT NULL,  -- the alert exactly as published (JSON)
     recorded_at datetime2(3)  NOT NULL DEFAULT sysutcdatetime()
 );
-CREATE INDEX ix_alerts_time ON trading.alerts (alert_time);
+CREATE INDEX ix_alerts_time ON electronx.alerts (alert_time);
 GO
 
 -- Fills with the trader who placed each order.
-CREATE VIEW trading.trader_fills AS
+CREATE VIEW electronx.trader_fills AS
 SELECT f.exec_id, f.exec_time, o.trader, f.symbol, f.side, f.qty, f.price, f.cl_ord_id, f.order_id, f.account
-FROM trading.fills AS f
-LEFT JOIN trading.orders AS o ON o.cl_ord_id = f.cl_ord_id;
+FROM electronx.fills AS f
+LEFT JOIN electronx.orders AS o ON o.cl_ord_id = f.cl_ord_id;

@@ -21,36 +21,36 @@ ORDER_VALUES = (
 )
 
 INSERT_ORDER_EVENT = f"""
-IF NOT EXISTS (SELECT 1 FROM trading.order_events WHERE stream_id = %(stream_id)s)
-    INSERT trading.order_events (stream_id, {ORDER_COLUMNS}) VALUES (%(stream_id)s, {ORDER_VALUES});
+IF NOT EXISTS (SELECT 1 FROM electronx.order_events WHERE stream_id = %(stream_id)s)
+    INSERT electronx.order_events (stream_id, {ORDER_COLUMNS}) VALUES (%(stream_id)s, {ORDER_VALUES});
 """
 
 # The latest state wins by version; an equal version overwrites (updates from before step 10 are all 0).
 UPSERT_ORDER = f"""
-UPDATE trading.orders SET
+UPDATE electronx.orders SET
     version = %(version)s, status = %(status)s, order_id = %(order_id)s, cum_qty = %(cum_qty)s,
     avg_px = %(avg_px)s, message = %(message)s, updated_at = %(updated_at)s, last_stream_id = %(stream_id)s
 WHERE cl_ord_id = %(cl_ord_id)s AND version <= %(version)s;
-IF @@ROWCOUNT = 0 AND NOT EXISTS (SELECT 1 FROM trading.orders WHERE cl_ord_id = %(cl_ord_id)s)
-    INSERT trading.orders ({ORDER_COLUMNS}, last_stream_id) VALUES ({ORDER_VALUES}, %(stream_id)s);
+IF @@ROWCOUNT = 0 AND NOT EXISTS (SELECT 1 FROM electronx.orders WHERE cl_ord_id = %(cl_ord_id)s)
+    INSERT electronx.orders ({ORDER_COLUMNS}, last_stream_id) VALUES ({ORDER_VALUES}, %(stream_id)s);
 """
 
 INSERT_FILL = """
-IF NOT EXISTS (SELECT 1 FROM trading.fills WHERE exec_id = %(exec_id)s)
-    INSERT trading.fills (exec_id, stream_id, order_id, cl_ord_id, account, symbol, side, qty, price, exec_time)
+IF NOT EXISTS (SELECT 1 FROM electronx.fills WHERE exec_id = %(exec_id)s)
+    INSERT electronx.fills (exec_id, stream_id, order_id, cl_ord_id, account, symbol, side, qty, price, exec_time)
     VALUES (%(exec_id)s, %(stream_id)s, %(order_id)s, %(cl_ord_id)s, %(account)s, %(symbol)s, %(side)s,
             %(qty)s, %(price)s, %(exec_time)s);
 """
 
 INSERT_ALERT = """
-IF NOT EXISTS (SELECT 1 FROM trading.alerts WHERE stream_id = %(stream_id)s)
-    INSERT trading.alerts (stream_id, type, trader, by_user, reason, alert_time, data)
+IF NOT EXISTS (SELECT 1 FROM electronx.alerts WHERE stream_id = %(stream_id)s)
+    INSERT electronx.alerts (stream_id, type, trader, by_user, reason, alert_time, data)
     VALUES (%(stream_id)s, %(type)s, %(trader)s, %(by_user)s, %(reason)s, %(alert_time)s, %(data)s);
 """
 
 SAVE_OFFSET = """
-UPDATE trading.stream_offsets SET last_id = %(last_id)s, updated_at = sysutcdatetime() WHERE stream = %(stream)s;
-IF @@ROWCOUNT = 0 INSERT trading.stream_offsets (stream, last_id) VALUES (%(stream)s, %(last_id)s);
+UPDATE electronx.stream_offsets SET last_id = %(last_id)s, updated_at = sysutcdatetime() WHERE stream = %(stream)s;
+IF @@ROWCOUNT = 0 INSERT electronx.stream_offsets (stream, last_id) VALUES (%(stream)s, %(last_id)s);
 """
 
 
@@ -74,5 +74,5 @@ def save_offset(conn: Connection, stream: str, last_id: str) -> None:
 
 def load_offsets(conn: Connection) -> dict[str, str]:
     cur = conn.cursor()
-    cur.execute("SELECT stream, last_id FROM trading.stream_offsets")
+    cur.execute("SELECT stream, last_id FROM electronx.stream_offsets")
     return {stream: last_id for stream, last_id in cur.fetchall()}

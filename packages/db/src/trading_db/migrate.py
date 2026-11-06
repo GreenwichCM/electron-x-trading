@@ -1,11 +1,12 @@
 """Schema migrations: numbered .sql files in trading_db/migrations, applied in order, each once.
 
-Everything the platform creates lives in its own SQL Server schema, `trading` (trading.orders,
-trading.fills, ...), so it can share a database with other applications without clashing with their
-tables in dbo, and a DBA can grant access to this schema alone (see packages/db/dba-setup.sql).
+Everything recorded for ElectronX lives in its own SQL Server schema, `electronx` (electronx.orders,
+electronx.fills, ...). It can share a database with other applications without clashing with
+their tables in dbo, a DBA can grant access to this schema alone (see packages/db/dba-setup.sql),
+and another exchange would get a schema of its own.
 
 A migration is plain T-SQL, split into batches on lines that say only GO (like sqlcmd and SSMS), and
-runs in one transaction with its row in trading.schema_migrations, so it is applied completely or not
+runs in one transaction with its row in electronx.schema_migrations, so it is applied completely or not
 at all. Never edit a migration that has been applied to a database you keep: add the next number.
 """
 
@@ -21,7 +22,7 @@ from .settings import DbSettings
 
 log = logging.getLogger("db.migrate")
 
-SCHEMA = "trading"
+SCHEMA = "electronx"
 
 
 class MigrationError(Exception):
