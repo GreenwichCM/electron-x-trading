@@ -7,7 +7,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 from fakeredis import FakeAsyncRedis
-from trading_core import KillSwitchState
+from trading_core import KillSwitchState, TradingRules
 from trading_fix import FixMessage, FixSession, SeqStore, SessionConfig, fix_week_start
 from trading_orderentry import (
     Instrument,
@@ -152,6 +152,9 @@ class OrderEntry:
             self.sink,
             account="TA-TEST",
             default_trader="trader@example.com",
+            rules=TradingRules.everyone(
+                ["alice"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
+            ),
             instruments={SYMBOL: Instrument(SYMBOL, 0.25, low_limit=0.0, high_limit=500.0, state="OPEN")},
         )
         cfg = SessionConfig(

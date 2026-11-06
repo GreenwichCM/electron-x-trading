@@ -1,4 +1,5 @@
-"""Run orderentry: `uv run --env-file services/orderentry/.env python -m trading_orderentry`."""
+"""Run orderentry:
+`uv run --env-file services/db.env --env-file services/orderentry/.env python -m trading_orderentry`."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import uvicorn
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from trading_core import BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, decode_blocks
+from trading_db import follow_rules
 from trading_fix import AlreadyRunning, FixSession, SeqStore, build_ssl_context, lock_state_dir
 
 from .app import OrderEntryApp
@@ -112,9 +114,7 @@ async def main() -> None:
         sink,
         account=settings.account,
         default_trader=settings.default_trader,
-        limits=settings.limits,
         throttle=Throttle(settings.rate_limit),
-        trader_ids=settings.trader_ids,
         capacity=settings.capacity,
     )
     oe.restore(rec, from_earlier_week=rec.from_earlier_week())
@@ -141,6 +141,9 @@ async def main() -> None:
         asyncio.create_task(refresh_instruments(redis, oe), name="instruments"),
         asyncio.create_task(watch_kill_switch(redis, oe), name="killswitch"),
         asyncio.create_task(save_regularly(state_path, oe, sink, rec), name="save"),
+        asyncio.create_task(
+            follow_rules(settings.db, oe.set_rules, settings.rules_refresh_s, appname="orderentry"), name="rules"
+        ),
     }
     done, _ = await asyncio.wait(tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in done - {stop_task}:
@@ -152,7 +155,7 @@ async def main() -> None:
     await session.stop()
     await sink.close()
     for task in tasks:
-        if task.get_name() in ("instruments", "killswitch", "save"):
+        if task.get_name() in ("instruments", "killswitch", "save", "rules"):
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     save(state_path, oe, sink, rec)  # after the sink has written everything, so nothing is replayed twice

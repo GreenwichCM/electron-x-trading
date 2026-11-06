@@ -7,9 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from trading_db import ConfigError as DbConfigError
+from trading_db import DbSettings
 from trading_fix import SessionConfig, TlsConfig
-
-from .risk import RiskLimits
 
 
 class ConfigError(Exception):
@@ -24,8 +24,8 @@ class Settings:
     account: str
     capacity: str
     default_trader: str
-    trader_ids: dict[str, str]
-    limits: RiskLimits
+    db: DbSettings  # trading rules (entitlements and limits) come from SQL Server
+    rules_refresh_s: float
     rate_limit: int
     redis_url: str
     control_host: str
@@ -62,15 +62,10 @@ class Settings:
                 client_key=Path(get("OE_CLIENT_KEY", "certs/client.key")),
                 server_name=get("OE_TLS_SERVER_NAME"),
             )
-        trader_ids = dict(
-            pair.split("=", 1) for pair in get("OE_TRADER_IDS").split(",") if "=" in pair
-        )  # e.g. alice=alice@example.com,bob=bob@example.com
-        limits = RiskLimits(
-            max_order_qty=int(get("OE_MAX_ORDER_QTY", "10")),
-            max_order_notional=float(get("OE_MAX_ORDER_NOTIONAL", "5000")),
-            max_open_orders=int(get("OE_MAX_OPEN_ORDERS", "20")),
-            max_position=int(get("OE_MAX_POSITION", "50")),
-        )
+        try:
+            db = DbSettings.from_env(env)  # services/db.env
+        except DbConfigError as exc:
+            raise ConfigError(str(exc)) from exc
         return cls(
             session=session,
             tls=tls,
@@ -78,8 +73,8 @@ class Settings:
             account=get("OE_ACCOUNT", "TA-HURON-00001"),
             capacity=get("OE_CAPACITY", "2"),
             default_trader=get("OE_DEFAULT_TRADER"),
-            trader_ids={k.strip(): v.strip() for k, v in trader_ids.items()},
-            limits=limits,
+            db=db,
+            rules_refresh_s=float(get("RULES_REFRESH_S", "5")),
             rate_limit=int(get("OE_RATE_LIMIT", "90")),
             redis_url=get("REDIS_URL", "redis://127.0.0.1:6379/0"),
             control_host=get("OE_CONTROL_HOST", "127.0.0.1"),

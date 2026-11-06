@@ -1,4 +1,5 @@
-"""Run the recorder: `uv run --env-file services/recorder/.env python -m trading_recorder`."""
+"""Run the recorder:
+`uv run --env-file services/db.env --env-file services/recorder/.env python -m trading_recorder`."""
 
 from __future__ import annotations
 

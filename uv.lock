@@ -603,10 +603,14 @@ version = "0.1.0"
 source = { editable = "packages/db" }
 dependencies = [
     { name = "pymssql" },
+    { name = "trading-core" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pymssql", specifier = ">=2.3.2" }]
+requires-dist = [
+    { name = "pymssql", specifier = ">=2.3.2" },
+    { name = "trading-core", editable = "packages/core" },
+]
 
 [[package]]
 name = "trading-dropcopy"
@@ -655,6 +659,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "redis" },
     { name = "trading-core" },
+    { name = "trading-db" },
     { name = "trading-fix" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -664,6 +669,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.6" },
     { name = "redis", specifier = ">=5.2.1" },
     { name = "trading-core", editable = "packages/core" },
+    { name = "trading-db", editable = "packages/db" },
     { name = "trading-fix", editable = "packages/fix" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
@@ -690,12 +696,14 @@ source = { editable = "services/riskmonitor" }
 dependencies = [
     { name = "redis" },
     { name = "trading-core" },
+    { name = "trading-db" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "redis", specifier = ">=5.2.1" },
     { name = "trading-core", editable = "packages/core" },
+    { name = "trading-db", editable = "packages/db" },
 ]
 
 [[package]]

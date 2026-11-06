@@ -6,13 +6,13 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from trading_core import KillSwitchState, TraderBlock
+from trading_core.rules import ANY, Limits, Trader, TradingRules
 from trading_fix import FixSession, SeqStore, SessionConfig
 from trading_orderentry import (
     Instrument,
     MemorySink,
     OrderEntryApp,
     OrderError,
-    RiskLimits,
     Status,
     create_control_app,
 )
@@ -46,7 +46,9 @@ class Harness:
             self.sink,
             account="TA-TEST",
             default_trader="trader@example.com",
-            limits=RiskLimits(max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50),
+            rules=TradingRules.everyone(
+                ["alice", "bob", "dave"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
+            ),
             instruments={SYMBOL: Instrument(SYMBOL, 0.25, low_limit=0.0, high_limit=500.0, state="OPEN")},
         )
         cfg = SessionConfig(
@@ -209,6 +211,45 @@ def test_a_blocked_trader_cannot_trade_and_their_orders_are_cancelled():
             await wait_for(lambda: again.status == Status.NEW)
 
     run(scenario())
+
+
+def test_trading_rules_decide_who_may_trade_what():
+    async def scenario():
+        async with Harness() as h:
+            pjm = "BFUT100-PJM-WESTERN_HUB-261231-15"
+            desk = Limits(max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50)
+            h.oe.set_rules(
+                TradingRules(
+                    traders={"alice": Trader("alice"), "dave": Trader("dave", "dave@electronx.example")},
+                    entitlements=frozenset({("alice", "ERCOT", ANY), ("dave", ANY, ANY)}),
+                    limits={(ANY, ANY, ANY): desk, ("alice", "ERCOT", ANY): Limits(max_order_qty=2)},
+                )
+            )
+            not_entitled = h.oe.submit("alice", pjm, "BUY", 1, 40.0)
+            assert not_entitled.status == Status.REJECTED and "not entitled to trade PJM" in not_entitled.text
+            stranger = h.oe.submit("mallory", SYMBOL, "BUY", 1, 40.0)
+            assert stranger.status == Status.REJECTED and "not set up to trade" in stranger.text
+            too_big = h.oe.submit("alice", SYMBOL, "BUY", 3, h.best(BID) - 1.0)  # alice's own limit is 2
+            assert too_big.status == Status.REJECTED and "limit of 2" in too_big.text
+
+            ok = h.oe.submit("dave", SYMBOL, "BUY", 3, h.best(BID) - 1.0)
+            await wait_for(lambda: ok.status == Status.NEW)
+            assert h.gw.session(SENDER).received[-1].get(50) == "dave@electronx.example"  # from electronx.traders
+            assert h.sent("D") == 1
+
+            h.oe.set_rules(
+                TradingRules(traders={"dave": Trader("dave")}, entitlements=frozenset({(ANY, ANY, ANY)}), limits={})
+            )
+            unlimited = h.oe.submit("dave", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            assert unlimited.status == Status.REJECTED and "no max_order_qty" in unlimited.text  # fails closed
+
+    run(scenario())
+
+
+def test_no_trading_before_the_rules_load():
+    oe = OrderEntryApp(MemorySink(), account="A", default_trader="t")
+    order = oe.submit("alice", SYMBOL, "BUY", 1, 40.0)
+    assert order.status == Status.REJECTED and "not loaded" in order.text
 
 
 def test_positions_by_trader():

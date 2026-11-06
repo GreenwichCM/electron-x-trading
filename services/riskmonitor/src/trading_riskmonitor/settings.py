@@ -6,12 +6,14 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .engine import Limits
+from trading_db import DbSettings
 
 
 @dataclass(frozen=True)
 class Settings:
-    limits: Limits
+    db: DbSettings  # loss and position limits come from the trading rules in SQL Server
+    rules_refresh_s: float
+    max_spread: float
     publish_s: float
     redis_url: str
     log_level: str
@@ -22,11 +24,9 @@ class Settings:
             return env.get(key, "").strip() or default
 
         return cls(
-            limits=Limits(
-                max_loss=float(get("RISK_MAX_LOSS", "5000")),
-                max_position=int(get("RISK_MAX_POSITION", "50")),
-                max_spread=float(get("RISK_MAX_SPREAD", "5")),
-            ),
+            db=DbSettings.from_env(env),
+            rules_refresh_s=float(get("RULES_REFRESH_S", "5")),
+            max_spread=float(get("RISK_MAX_SPREAD", "5")),
             publish_s=float(get("RISK_PUBLISH_S", "1")),
             redis_url=get("REDIS_URL", "redis://127.0.0.1:6379/0"),
             log_level=get("LOG_LEVEL", "INFO").upper(),

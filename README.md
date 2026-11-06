@@ -10,7 +10,7 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 | `packages/core` | Shared definitions: markets, products, symbols |
 | `packages/fix` | FIX session layer (logon, heartbeats, sequence numbers, resend, mutual TLS) |
 | `packages/sim` | Simulated ElectronX gateways for tests and development |
-| `packages/db` | SQL Server settings, connections and schema migrations |
+| `packages/db` | SQL Server settings, connections, schema migrations and trading rules |
 | `services/marketdata` | MD session -> order books -> Redis |
 | `services/orderentry` | Pre-trade risk, throttle, OE session, internal order endpoint, kill switch |
 | `services/dropcopy` | The exchange's copy of every fill: positions, break detection, kill switch trip |
@@ -22,15 +22,17 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 ## First-time setup (WSL)
 
 Copy each `.env.example` to `.env` next to it and fill in the secrets (see the comments in each file).
-`services/api/.env` and `services/orderentry/.env` must have the same `OE_INTERNAL_TOKEN`;
-`services/recorder/.env` has the same `DB_PASSWORD` as `MSSQL_SA_PASSWORD` in `.env`.
+`services/api/.env` and `services/orderentry/.env` must have the same `OE_INTERNAL_TOKEN`.
+The database login every service shares is in `services/db.env` (from `services/db.env.example`); with
+the development SQL Server its `DB_PASSWORD` is `MSSQL_SA_PASSWORD` from `.env`.
 
 Only one copy of orderentry and of dropcopy may run at a time; a second one refuses to start.
 
     uv sync
     npm --prefix web install
     docker compose up -d
-    uv run --env-file services/recorder/.env python -m trading_db migrate
+    uv run --env-file services/db.env python -m trading_db migrate
+    uv run --env-file services/db.env python -m trading_db seed-dev    # rules for the test users
 
 ## Run everything
 
@@ -61,8 +63,32 @@ by the `migrate` command above (`status` lists them).
 Fills come from drop copy and carry the ClOrdID, not the trader; the join with `electronx.orders` adds it.
 
 To use another SQL Server (for example a shared company database), point `DB_HOST`, `DB_PORT`,
-`DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/recorder/.env` at it and run `migrate`. For a
+`DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/db.env` at it and run `migrate`. For a
 login that can reach only the `electronx` schema, give your DBA `packages/db/dba-setup.sql`.
+
+## Trading rules
+
+Who may trade what, and the limits, live in SQL Server, and orderentry and riskmonitor reload them
+every few seconds, so a change takes effect without a restart:
+
+| Table | What |
+|---|---|
+| `electronx.traders` | Who may trade (`active`), and their ElectronX trader id for SenderSubID(50) |
+| `electronx.entitlements` | What each trader may trade, by market and product (`'*'` = any) |
+| `electronx.limits` | Order size and value, open orders, position per contract, max loss |
+
+Entitlements and limits are keyed by trader, market and product, where `'*'` means any; for each
+limit the most specific row wins, and the `('*', '*', '*')` row is the desk default. The rules fail
+closed: anyone not in `traders`, a contract no entitlement covers, or a limit no row sets means the
+order is rejected. If SQL Server is unreachable the last rules loaded stay in force. Cancels are never
+blocked. Examples, in SSMS:
+
+    -- let alice trade PJM too
+    INSERT electronx.entitlements (trader_id, market, product) VALUES (N'alice', 'PJM', '*');
+    -- at most 5 lots per contract for dave in PJM BFUT100
+    INSERT electronx.limits (trader_id, market, product, max_position) VALUES (N'dave', 'PJM', 'BFUT100', 5);
+    -- stop dave trading (his live orders stay; use Block on the dashboard to cancel them too)
+    UPDATE electronx.traders SET active = 0 WHERE trader_id = N'dave';
 
 ## Start again from a clean slate
 

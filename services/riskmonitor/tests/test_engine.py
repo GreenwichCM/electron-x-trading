@@ -2,8 +2,8 @@ import asyncio
 import json
 
 from fakeredis import FakeAsyncRedis
-from trading_core import BLOCKS_KEY, decode_blocks
-from trading_riskmonitor import SNAPSHOT_KEY, Limits, RiskEngine, follow_streams, publish
+from trading_core import BLOCKS_KEY, Limits, TradingRules, decode_blocks
+from trading_riskmonitor import SNAPSHOT_KEY, RiskEngine, follow_streams, publish
 
 X, Y = "BFUT500-ERCOT-HB_NORTH-261231-15", "BFUT100-PJM-WESTERN_HUB-261231-15"
 
@@ -29,7 +29,7 @@ def book(bid, ask, symbol=X):
 
 
 def test_pnl_per_trader_and_for_the_desk():
-    e = RiskEngine(Limits(max_loss=1000, max_position=10), clock=Clock())
+    e = RiskEngine(TradingRules.everyone(["alice", "dave"], max_loss=1000, max_position=10), clock=Clock())
     e.on_order(order("A1", "alice"))
     e.on_order(order("D1", "dave"))
     e.on_fill(fill("E1", "A1", "BUY", 2, 40.0))
@@ -53,13 +53,30 @@ def test_fills_wait_for_their_order_and_duplicates_count_once():
 
 
 def test_loss_limit_breach():
-    e = RiskEngine(Limits(max_loss=10), clock=Clock())
+    e = RiskEngine(TradingRules.everyone(["alice"], max_loss=10), clock=Clock())
     e.on_order(order("A1", "alice"))
     e.on_fill(fill("E1", "A1", "BUY", 2, 50.0))
     e.on_book(book(44.0, 45.0))  # mark 44.5: loss 11
     snap = e.snapshot()
     assert snap["traders"]["alice"]["limits"]["loss"]["pct"] == 110.0
     assert "reached the limit" in e.breaches(snap)["alice"]
+
+
+def test_limits_come_from_the_rules_per_trader_and_contract():
+    e = RiskEngine(clock=Clock())  # no rules loaded yet: no limits, so no usage and no breach
+    e.on_order(order("A1", "alice"))
+    e.on_fill(fill("E1", "A1", "BUY", 4, 50.0))
+    e.on_fill(fill("E2", "A1", "BUY", 3, 50.0, symbol=Y))
+    e.on_book(book(40.0, 41.0))
+    snap = e.snapshot()
+    assert snap["traders"]["alice"]["limits"] == {"loss": None, "position": None} and e.breaches(snap) == {}
+
+    rules = TradingRules.everyone(["alice"], max_position=50, max_loss=100)
+    rules.limits[("alice", "PJM", "*")] = Limits(max_position=5)  # tighter in PJM
+    e.set_rules(rules)
+    limits = e.snapshot()["traders"]["alice"]["limits"]
+    assert limits["position"] == {"used": 3, "limit": 5, "pct": 60.0, "symbol": Y}  # 3/5 beats 4/50
+    assert limits["loss"]["limit"] == 100
 
 
 def test_mark_age_is_reported():
@@ -77,7 +94,7 @@ def test_streams_snapshot_and_automatic_block_through_redis():
         r = FakeAsyncRedis()
         await r.xadd("orders", {"data": json.dumps(order("A1", "alice"))})
         await r.xadd("fills", {"data": json.dumps(fill("E1", "A1", "BUY", 2, 50.0))})
-        e = RiskEngine(Limits(max_loss=10))
+        e = RiskEngine(TradingRules.everyone(["alice"], max_loss=10))
         e.on_book(book(44.0, 45.0))
         tasks = [asyncio.create_task(follow_streams(r, e)), asyncio.create_task(publish(r, e, every_s=0.05))]
         for _ in range(100):

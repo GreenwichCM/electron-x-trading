@@ -1,7 +1,7 @@
 """Pre-trade risk: every order is checked here before it can reach the exchange.
 
-Limits are placeholders until risk & compliance set them; later they come from SQL Server
-(trading_entitlements, risk_limits) per trader, desk and firm.
+Entitlements and the limits used here come from the trading rules in SQL Server (see
+trading_core/rules.py); OrderEntryApp turns them into RiskLimits for each order.
 """
 
 from __future__ import annotations

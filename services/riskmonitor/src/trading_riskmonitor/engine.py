@@ -2,25 +2,23 @@
 
 Fills come from dropcopy (the exchange's record) and carry a ClOrdID but no trader; the trader is
 found from orderentry's `orders` stream. A fill whose order is not known yet waits until it is.
+
+Limits come from the trading rules in SQL Server (set_rules): each trader's max loss, and the max
+position of each contract. A trader with no loss limit set shows no usage and is never blocked here;
+orderentry rejects their orders anyway, since its rules fail closed.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from trading_core import TradingRules
+
 from .marks import Mark, choose_mark
 from .positions import Position
-
-
-@dataclass(frozen=True)
-class Limits:
-    max_loss: float = 5_000.0  # USD, per trader; reaching it blocks the trader
-    max_position: int = 50  # lots, per trader and contract; shown as usage, enforced by orderentry
-    max_spread: float = 5.0  # USD/MWh; wider books are not marked at their mid
 
 
 def _pct(used: float, limit: float) -> float:
@@ -28,8 +26,14 @@ def _pct(used: float, limit: float) -> float:
 
 
 class RiskEngine:
-    def __init__(self, limits: Limits | None = None, clock: Callable[[], float] = time.time):
-        self.limits = limits or Limits()
+    def __init__(
+        self,
+        rules: TradingRules | None = None,
+        max_spread: float = 5.0,  # USD/MWh; wider books are not marked at their mid
+        clock: Callable[[], float] = time.time,
+    ):
+        self.rules = rules
+        self.max_spread = max_spread
         self.clock = clock
         self.traders: dict[str, str] = {}  # ClOrdID -> trader
         self.positions: dict[tuple[str, str], Position] = {}  # (trader, symbol) -> position
@@ -61,6 +65,9 @@ class RiskEngine:
         self.books[book["symbol"]] = dict(book)
         self._remark(book["symbol"])
 
+    def set_rules(self, rules: TradingRules) -> None:
+        self.rules = rules
+
     def on_instrument(self, instrument: Mapping[str, Any]) -> None:
         self.instruments[instrument["symbol"]] = dict(instrument)
 
@@ -76,7 +83,7 @@ class RiskEngine:
             self.instruments.get(symbol),
             self.marks.get(symbol),
             self.clock(),
-            self.limits.max_spread,
+            self.max_spread,
         )
 
     # ---- outputs ---------------------------------------------------------------------------
@@ -108,13 +115,8 @@ class RiskEngine:
             for k in ("realized", "unrealized", "total"):
                 desk[k] += t[k]
                 t[k] = round(t[k], 2)
-            loss = max(0.0, -t["total"])
-            biggest = max((abs(p["qty"]) for p in t["positions"].values()), default=0)
-            max_loss, max_pos = self.limits.max_loss, self.limits.max_position
-            t["limits"] = {
-                "loss": {"used": round(loss, 2), "limit": max_loss, "pct": _pct(loss, max_loss)},
-                "position": {"used": biggest, "limit": max_pos, "pct": _pct(biggest, max_pos)},
-            }
+        for trader, t in traders.items():
+            t["limits"] = {"loss": self._loss_usage(trader, t), "position": self._position_usage(trader, t)}
         waiting = sum(len(f) for f in self._waiting.values())
         return {
             "time": datetime.fromtimestamp(now, UTC).isoformat(timespec="milliseconds"),
@@ -123,11 +125,29 @@ class RiskEngine:
             "unattributed_fills": waiting,
         }
 
+    def _loss_usage(self, trader: str, t: Mapping[str, Any]) -> dict[str, Any] | None:
+        limit = self.rules.limits_for(trader).max_loss if self.rules else None
+        if not limit:
+            return None
+        loss = max(0.0, -t["total"])
+        return {"used": round(loss, 2), "limit": limit, "pct": _pct(loss, limit)}
+
+    def _position_usage(self, trader: str, t: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The contract closest to its own position limit (limits can differ by market and product)."""
+        worst = None
+        for symbol, p in t["positions"].items():
+            limit = self.rules.limits_for(trader, symbol).max_position if self.rules else None
+            if limit:
+                usage = {"used": abs(p["qty"]), "limit": limit, "pct": _pct(abs(p["qty"]), limit), "symbol": symbol}
+                if worst is None or usage["pct"] > worst["pct"]:
+                    worst = usage
+        return worst
+
     def breaches(self, snapshot: Mapping[str, Any]) -> dict[str, str]:
-        """trader -> reason, for every trader whose loss has reached the limit."""
+        """trader -> reason, for every trader whose loss has reached their limit."""
         out = {}
         for trader, t in snapshot["traders"].items():
             loss = t["limits"]["loss"]
-            if loss["limit"] and loss["used"] >= loss["limit"]:
+            if loss and loss["used"] >= loss["limit"]:
                 out[trader] = f"loss {loss['used']:.2f} reached the limit of {loss['limit']:.2f}"
         return out

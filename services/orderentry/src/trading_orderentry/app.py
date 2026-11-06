@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping
 from decimal import Decimal
 
-from trading_core import KillSwitchState, TraderBlock
+from trading_core import KillSwitchState, TraderBlock, TradingRules
 from trading_fix import FixMessage, FixSession, SessionError, utc_timestamp
 
 from .orders import FROM_ORD_STATUS, LIVE, SIDE_TO_FIX, TIF_TO_FIX, Order, Status, now_iso
@@ -38,18 +38,16 @@ class OrderEntryApp:
         sink: OrderSink,
         account: str,
         default_trader: str,
-        limits: RiskLimits | None = None,
+        rules: TradingRules | None = None,
         throttle: Throttle | None = None,
-        trader_ids: Mapping[str, str] | None = None,
         capacity: str = "2",
         instruments: Mapping[str, Instrument] | None = None,
     ):
         self.sink = sink
         self.account = account
-        self.default_trader = default_trader
-        self.trader_ids = dict(trader_ids or {})  # our user id -> ElectronX trader id for SenderSubID(50)
+        self.default_trader = default_trader  # ElectronX trader id for anyone without their own
         self.capacity = capacity
-        self.limits = limits or RiskLimits()
+        self.rules = rules  # from SQL Server (set_rules); until then every new order is rejected
         self.throttle = throttle or Throttle(90)
         self.instruments: dict[str, Instrument] = dict(instruments or {})
         self.session: FixSession | None = None
@@ -173,6 +171,10 @@ class OrderEntryApp:
                         return  # the rest go out on the next call
                     self._send_cancel(order)
 
+    def set_rules(self, rules: TradingRules) -> None:
+        """New trading rules (entitlements and limits) for orders from now on. Live orders are kept."""
+        self.rules = rules
+
     def positions_by_trader(self) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {}
         for (trader, symbol), qty in self.positions.items():
@@ -285,9 +287,12 @@ class OrderEntryApp:
             return f"side must be BUY or SELL, not {order.side}"
         if order.tif not in TIF_TO_FIX:
             return f"time in force must be one of {', '.join(TIF_TO_FIX)}"
+        limits, reason = self._limits_for(order)
+        if limits is None:
+            return reason
         open_orders = [o for o in self.orders.values() if o.trader == order.trader and o.live and o is not order]
         position = self.positions.get((order.trader, order.symbol), 0)
-        reason = check_order(order, self.instruments.get(order.symbol), self.limits, open_orders, position)
+        reason = check_order(order, self.instruments.get(order.symbol), limits, open_orders, position)
         if reason is not None:
             return reason
         if not self._logged_on():
@@ -317,8 +322,21 @@ class OrderEntryApp:
             header=[(50, self._exchange_trader(order.trader))],
         )
 
+    def _limits_for(self, order: Order) -> tuple[RiskLimits | None, str]:
+        """The limits for this order from the trading rules, or None and why it may not be placed."""
+        if self.rules is None:
+            return None, "trading rules are not loaded yet (is SQL Server reachable?)"
+        reason = self.rules.check_trader(order.trader, order.symbol)
+        if reason is not None:
+            return None, reason
+        lim = self.rules.limits_for(order.trader, order.symbol)
+        missing = lim.missing("max_order_qty", "max_order_notional", "max_open_orders", "max_position")
+        if missing:
+            return None, f"no {', '.join(missing)} limit is set for {order.trader} on {order.symbol}"
+        return RiskLimits(lim.max_order_qty, lim.max_order_notional, lim.max_open_orders, lim.max_position), ""
+
     def _exchange_trader(self, trader: str) -> str:
-        return self.trader_ids.get(trader, self.default_trader)
+        return (self.rules.exchange_trader(trader) if self.rules else None) or self.default_trader
 
     def _logged_on(self) -> bool:
         return self.session is not None and self.session.logged_on

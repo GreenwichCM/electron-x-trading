@@ -13,14 +13,14 @@ type PositionRisk = {
   unrealized: number;
 };
 
-type Usage = { used: number; limit: number; pct: number };
+type Usage = { used: number; limit: number; pct: number; symbol?: string };
 
 type TraderRisk = {
   positions: Record<string, PositionRisk>;
   realized: number;
   unrealized: number;
   total: number;
-  limits?: { loss: Usage; position: Usage };
+  limits?: { loss: Usage | null; position: Usage | null }; // null: no limit set in SQL Server
   blocked: { reason: string; by: string; time: string } | null;
 };
 
@@ -38,11 +38,12 @@ function Pnl({ value }: { value: number }) {
 }
 
 /** A limit usage bar: green under 80%, amber to 100%, red at or over the limit. */
-function UsageBar({ usage }: { usage?: Usage }) {
-  if (!usage) return <td />;
+function UsageBar({ usage }: { usage?: Usage | null }) {
+  if (usage === undefined) return <td />; // no positions yet
+  if (usage === null) return <td className="qty">no limit</td>;
   const level = usage.pct >= 100 ? "over" : usage.pct >= 80 ? "near" : "ok";
   return (
-    <td title={`${usage.used} of ${usage.limit}`}>
+    <td title={`${usage.used} of ${usage.limit}${usage.symbol ? ` in ${usage.symbol}` : ""}`}>
       <div className="usage">
         <div className="bar">
           <div className={`fill ${level}`} style={{ width: `${Math.min(usage.pct, 100)}%` }} />
@@ -102,7 +103,7 @@ export default function Risk({ user }: { user: User }) {
             <th className="num">Unrealized</th>
             <th className="num">Total P&amp;L</th>
             <th>Loss limit</th>
-            <th>Largest position</th>
+            <th>Position limit</th>
             <th>Status</th>
             {canBlock && <th />}
           </tr>

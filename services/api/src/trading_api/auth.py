@@ -61,6 +61,7 @@ DEV_USERS: dict[str, User] = {
     "alice": User("alice", "Alice (trader)", ("trader",)),
     "bob": User("bob", "Bob (risk)", ("risk",)),
     "carol": User("carol", "Carol (management)", ("management",)),
+    "dave": User("dave", "Dave (trader)", ("trader",)),
 }
 
 

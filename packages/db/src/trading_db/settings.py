@@ -27,7 +27,7 @@ class DbSettings:
             return env.get(key, "").strip() or default
 
         if not get("DB_PASSWORD"):
-            raise ConfigError("DB_PASSWORD is not set (see services/recorder/.env.example)")
+            raise ConfigError("DB_PASSWORD is not set (copy services/db.env.example to services/db.env)")
         return cls(
             host=get("DB_HOST", "127.0.0.1"),
             port=int(get("DB_PORT", "1433")),

@@ -5,6 +5,7 @@ description = "Order entry service: pre-trade risk, throttle and the ElectronX o
 requires-python = ">=3.14"
 dependencies = [
     "trading-core",
+    "trading-db",
     "trading-fix",
     "redis>=5.2.1",
     "fastapi>=0.115.6",
@@ -13,6 +14,7 @@ dependencies = [
 
 [tool.uv.sources]
 trading-core = { workspace = true }
+trading-db = { workspace = true }
 trading-fix = { workspace = true }
 
 [build-system]

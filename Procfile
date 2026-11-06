@@ -3,9 +3,9 @@
 # If any one process exits, honcho stops all of them: read the last lines to see which one and why.
 sim: uv run python -m trading_sim
 marketdata: uv run --env-file services/marketdata/.env python -m trading_marketdata
-orderentry: uv run --env-file services/orderentry/.env python -m trading_orderentry
+orderentry: uv run --env-file services/db.env --env-file services/orderentry/.env python -m trading_orderentry
 dropcopy: uv run --env-file services/dropcopy/.env python -m trading_dropcopy
-riskmonitor: uv run --env-file services/riskmonitor/.env python -m trading_riskmonitor
-recorder: uv run --env-file services/recorder/.env python -m trading_recorder
+riskmonitor: uv run --env-file services/db.env --env-file services/riskmonitor/.env python -m trading_riskmonitor
+recorder: uv run --env-file services/db.env --env-file services/recorder/.env python -m trading_recorder
 api: uv run --env-file services/api/.env python -m trading_api
 web: npm --prefix web run dev

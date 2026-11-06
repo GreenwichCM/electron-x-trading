@@ -65,7 +65,7 @@ class Recorder:
             conn.close()
             raise SchemaError(
                 f"database schema is at version {version}, this recorder needs {LATEST}: run "
-                "`uv run --env-file services/recorder/.env python -m trading_db migrate`"
+                "`uv run --env-file services/db.env python -m trading_db migrate`"
             )
         self.conn = conn
         self.offsets = {s: "0-0" for s in STREAMS} | store.load_offsets(conn)
