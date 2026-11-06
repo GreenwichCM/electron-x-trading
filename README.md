@@ -49,12 +49,18 @@ The simulator keeps resting orders across its own restarts, like the exchange.
 
 ## History in SQL Server
 
-The recorder copies every order update, fill and alert into the `trading` database. Redis keeps only
-the latest entries; SQL Server keeps everything. Schema changes are numbered files in
-`packages/db/src/trading_db/migrations`, applied by the `migrate` command above (`status` lists them).
+The recorder copies every order update, fill and alert into SQL Server. Redis keeps only the latest
+entries; SQL Server keeps everything. All tables and views are in their own `trading` schema
+(`trading.orders`, `trading.trader_fills`, ...), so the database can be shared with other
+applications. Schema changes are numbered files in `packages/db/src/trading_db/migrations`, applied
+by the `migrate` command above (`status` lists them).
 
     docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -U sa -P "$(grep MSSQL_SA_PASSWORD .env | cut -d= -f2-)" \
-        -d trading -Q "SELECT TOP 10 exec_time, trader, symbol, side, qty, price FROM dbo.trader_fills ORDER BY exec_time DESC"
+        -d trading -Q "SELECT TOP 10 exec_time, trader, symbol, side, qty, price FROM trading.trader_fills ORDER BY exec_time DESC"
+
+To use another SQL Server (for example a shared company database), point `DB_HOST`, `DB_PORT`,
+`DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/recorder/.env` at it and run `migrate`. For a
+login that can reach only the `trading` schema, give your DBA `packages/db/dba-setup.sql`.
 
 ## Start again from a clean slate
 

@@ -1,8 +1,12 @@
 """Schema migrations: numbered .sql files in trading_db/migrations, applied in order, each once.
 
+Everything the platform creates lives in its own SQL Server schema, `trading` (trading.orders,
+trading.fills, ...), so it can share a database with other applications without clashing with their
+tables in dbo, and a DBA can grant access to this schema alone (see packages/db/dba-setup.sql).
+
 A migration is plain T-SQL, split into batches on lines that say only GO (like sqlcmd and SSMS), and
-runs in one transaction with its row in dbo.schema_migrations, so it is applied completely or not at
-all. Never edit a migration that has been applied anywhere: add the next number instead.
+runs in one transaction with its row in trading.schema_migrations, so it is applied completely or not
+at all. Never edit a migration that has been applied to a database you keep: add the next number.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from .connection import Connection, DbError, connect
 from .settings import DbSettings
 
 log = logging.getLogger("db.migrate")
+
+SCHEMA = "trading"
 
 
 class MigrationError(Exception):
@@ -64,7 +70,13 @@ def _has_sql(batch: str) -> bool:
 
 
 def ensure_database(settings: DbSettings) -> None:
-    """Create the database if it does not exist yet (development; in production a DBA does this)."""
+    """Create the database if it does not exist yet. Only then does this touch `master`; a database
+    that exists already (say, a shared one a DBA created) is just used."""
+    try:
+        connect(settings, login_timeout=5).close()
+        return
+    except DbError:
+        pass  # missing, or not reachable: creating it below either works or says why
     with closing(connect(settings, database="master", autocommit=True)) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -74,10 +86,13 @@ def ensure_database(settings: DbSettings) -> None:
         )
 
 
-def _ensure_table(conn: Connection) -> None:
-    conn.cursor().execute(
-        "IF OBJECT_ID('dbo.schema_migrations') IS NULL "
-        "CREATE TABLE dbo.schema_migrations ("
+def _ensure_schema_and_table(conn: Connection) -> None:
+    cur = conn.cursor()
+    # CREATE SCHEMA must be alone in its batch, hence EXEC. Skipped if a DBA created it already.
+    cur.execute(f"IF SCHEMA_ID('{SCHEMA}') IS NULL EXEC('CREATE SCHEMA {SCHEMA}')")
+    cur.execute(
+        f"IF OBJECT_ID('{SCHEMA}.schema_migrations') IS NULL "
+        f"CREATE TABLE {SCHEMA}.schema_migrations ("
         " version int NOT NULL PRIMARY KEY,"
         " name nvarchar(200) NOT NULL,"
         " applied_at datetime2(3) NOT NULL DEFAULT sysutcdatetime())"
@@ -87,10 +102,10 @@ def _ensure_table(conn: Connection) -> None:
 
 def applied_versions(conn: Connection) -> set[int]:
     cur = conn.cursor()
-    cur.execute("SELECT CASE WHEN OBJECT_ID('dbo.schema_migrations') IS NULL THEN 0 ELSE 1 END")
+    cur.execute(f"SELECT CASE WHEN OBJECT_ID('{SCHEMA}.schema_migrations') IS NULL THEN 0 ELSE 1 END")
     if not cur.fetchone()[0]:
         return set()
-    cur.execute("SELECT version FROM dbo.schema_migrations")
+    cur.execute(f"SELECT version FROM {SCHEMA}.schema_migrations")
     return {row[0] for row in cur.fetchall()}
 
 
@@ -103,7 +118,7 @@ def migrate(settings: DbSettings) -> list[str]:
     ensure_database(settings)
     done = []
     with closing(connect(settings)) as conn:
-        _ensure_table(conn)
+        _ensure_schema_and_table(conn)
         applied = applied_versions(conn)
         for m in load_migrations():
             if m.version in applied:
@@ -112,7 +127,7 @@ def migrate(settings: DbSettings) -> list[str]:
             try:
                 for batch in batches(m.sql):
                     cur.execute(batch)
-                cur.execute("INSERT dbo.schema_migrations (version, name) VALUES (%s, %s)", (m.version, m.name))
+                cur.execute(f"INSERT {SCHEMA}.schema_migrations (version, name) VALUES (%s, %s)", (m.version, m.name))
                 conn.commit()
             except DbError as exc:
                 conn.rollback()

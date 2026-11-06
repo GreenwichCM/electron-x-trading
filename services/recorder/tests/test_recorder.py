@@ -90,13 +90,13 @@ def test_records_everything_once_and_keeps_the_latest_order_state(sql_server):
 
     recorder = make_recorder(r, sql_server)
     assert drain(recorder) == 7  # in batches of 2, one transaction each
-    assert query(sql_server, "SELECT cl_ord_id, version, status, cum_qty FROM dbo.orders ORDER BY cl_ord_id") == [
+    assert query(sql_server, "SELECT cl_ord_id, version, status, cum_qty FROM trading.orders ORDER BY cl_ord_id") == [
         ("A", 3, "partially_filled", 1),
         ("B", 1, "new", 0),
     ]
-    assert query(sql_server, "SELECT COUNT(*) FROM dbo.order_events")[0][0] == 4
-    assert query(sql_server, "SELECT exec_id, trader, qty FROM dbo.trader_fills") == [("E1", "alice", 1)]
-    assert query(sql_server, "SELECT type, trader, by_user FROM dbo.alerts ORDER BY stream_id") == [
+    assert query(sql_server, "SELECT COUNT(*) FROM trading.order_events")[0][0] == 4
+    assert query(sql_server, "SELECT exec_id, trader, qty FROM trading.trader_fills") == [("E1", "alice", 1)]
+    assert query(sql_server, "SELECT type, trader, by_user FROM trading.alerts ORDER BY stream_id") == [
         ("killswitch_on", None, "dropcopy"),
         ("trader_blocked", "dave", "riskmonitor"),
     ]
@@ -109,10 +109,10 @@ def test_records_everything_once_and_keeps_the_latest_order_state(sql_server):
 
     # even reading everything a second time duplicates nothing
     with closing(connect(sql_server, autocommit=True)) as conn:
-        conn.cursor().execute("DELETE FROM dbo.stream_offsets")
+        conn.cursor().execute("DELETE FROM trading.stream_offsets")
     assert drain(make_recorder(r, sql_server)) == 8
-    assert query(sql_server, "SELECT COUNT(*) FROM dbo.fills")[0][0] == 2
-    assert query(sql_server, "SELECT COUNT(*) FROM dbo.order_events")[0][0] == 4
+    assert query(sql_server, "SELECT COUNT(*) FROM trading.fills")[0][0] == 2
+    assert query(sql_server, "SELECT COUNT(*) FROM trading.order_events")[0][0] == 4
 
 
 def test_a_bad_entry_is_skipped_not_stuck(sql_server):
@@ -121,7 +121,7 @@ def test_a_bad_entry_is_skipped_not_stuck(sql_server):
     r.xadd("fills", {"data": json.dumps({"exec_id": "E1"})})  # no symbol, side, qty or price
     add(r, "fills", fill("E2", "A", 1))
     assert drain(make_recorder(r, sql_server)) == 2
-    assert query(sql_server, "SELECT exec_id FROM dbo.fills") == [("E2",)]
+    assert query(sql_server, "SELECT exec_id FROM trading.fills") == [("E2",)]
 
 
 def test_carries_on_after_sql_server_drops_the_connection(sql_server, sql_server_master):
@@ -147,7 +147,7 @@ def test_carries_on_after_sql_server_drops_the_connection(sql_server, sql_server
     stop.set()
     thread.join(10)
     assert not thread.is_alive() and recorder.recorded == 2
-    assert query(sql_server, "SELECT status FROM dbo.orders") == [("filled",)]
+    assert query(sql_server, "SELECT status FROM trading.orders") == [("filled",)]
 
 
 def test_run_stops_when_asked(sql_server):

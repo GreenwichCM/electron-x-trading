@@ -15,8 +15,20 @@ def test_migrations_are_numbered_from_one():
     assert [m.version for m in migrations] == list(range(1, LATEST + 1))
 
 
+def test_migrations_only_touch_the_trading_schema():
+    for m in load_migrations():
+        assert "dbo." not in m.sql.lower(), f"{m.name} refers to dbo"
+
+
 def test_settings_never_show_the_password():
     assert "secret" not in repr(DbSettings(password="secret"))
+
+
+def objects(settings, schema):
+    with closing(connect(settings)) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sys.objects WHERE type IN ('U', 'V') AND schema_id = SCHEMA_ID(%s)", (schema,))
+        return {row[0] for row in cur.fetchall()}
 
 
 def test_migrate_creates_the_database_and_runs_each_migration_once(sql_server):
@@ -24,20 +36,36 @@ def test_migrate_creates_the_database_and_runs_each_migration_once(sql_server):
     assert migrate(sql_server) == []
     applied, pending = status(sql_server)
     assert pending == [] and len(applied) == LATEST
+    tables = {"orders", "order_events", "fills", "alerts", "stream_offsets", "trader_fills", "schema_migrations"}
+    assert tables <= objects(sql_server, "trading")
+    assert objects(sql_server, "dbo") == set()
+
+
+def test_a_shared_database_with_its_own_orders_table(sql_server):
+    """Another application's dbo.orders is neither in the way nor touched."""
+    from trading_db.migrate import ensure_database
+
+    ensure_database(sql_server)
+    with closing(connect(sql_server, autocommit=True)) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE dbo.orders (id int PRIMARY KEY, customer nvarchar(50)); INSERT dbo.orders VALUES (1, N'x')"
+        )
+    migrate(sql_server)
+    assert objects(sql_server, "dbo") == {"orders"}
     with closing(connect(sql_server)) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT name FROM sys.objects WHERE type IN ('U', 'V') ORDER BY name")
-        names = {row[0] for row in cur.fetchall()}
-    assert {"orders", "order_events", "fills", "alerts", "stream_offsets", "trader_fills"} <= names
+        cur.execute("SELECT customer FROM dbo.orders")
+        assert cur.fetchall() == [("x",)]
 
 
 def test_a_failing_migration_changes_nothing(sql_server, monkeypatch):
     module = importlib.import_module("trading_db.migrate")  # the module, not the function of that name
-    broken = module.Migration(1, "0001_broken.sql", "CREATE TABLE dbo.half (x int);\nGO\nSELECT * FROM nowhere;")
-    monkeypatch.setattr(module, "load_migrations", lambda: [broken])
+    sql = "CREATE TABLE trading.half (x int);\nGO\nSELECT * FROM nowhere;"
+    monkeypatch.setattr(module, "load_migrations", lambda: [module.Migration(1, "0001_broken.sql", sql)])
     with pytest.raises(MigrationError, match="rolled back"):
         migrate(sql_server)
     with closing(connect(sql_server)) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT OBJECT_ID('dbo.half')")
+        cur.execute("SELECT OBJECT_ID('trading.half')")
         assert cur.fetchone()[0] is None
