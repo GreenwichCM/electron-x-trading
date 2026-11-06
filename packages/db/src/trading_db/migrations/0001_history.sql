@@ -52,7 +52,8 @@ CREATE TABLE electronx.orders (
 );
 CREATE INDEX ix_orders_trader ON electronx.orders (trader, created_at);
 
--- The exchange's fills, from drop copy (they carry the ClOrdID, not the trader: see trader_fills).
+-- The exchange's fills, from drop copy. They carry the ClOrdID, not the trader: join electronx.orders
+-- on cl_ord_id for that (see the README). No views here: many logins may create tables but not views.
 CREATE TABLE electronx.fills (
     exec_id     varchar(64)   NOT NULL PRIMARY KEY,
     stream_id   varchar(32)   NOT NULL,
@@ -81,10 +82,3 @@ CREATE TABLE electronx.alerts (
     recorded_at datetime2(3)  NOT NULL DEFAULT sysutcdatetime()
 );
 CREATE INDEX ix_alerts_time ON electronx.alerts (alert_time);
-GO
-
--- Fills with the trader who placed each order.
-CREATE VIEW electronx.trader_fills AS
-SELECT f.exec_id, f.exec_time, o.trader, f.symbol, f.side, f.qty, f.price, f.cl_ord_id, f.order_id, f.account
-FROM electronx.fills AS f
-LEFT JOIN electronx.orders AS o ON o.cl_ord_id = f.cl_ord_id;

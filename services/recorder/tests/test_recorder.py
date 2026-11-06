@@ -95,7 +95,11 @@ def test_records_everything_once_and_keeps_the_latest_order_state(sql_server):
         ("B", 1, "new", 0),
     ]
     assert query(sql_server, "SELECT COUNT(*) FROM electronx.order_events")[0][0] == 4
-    assert query(sql_server, "SELECT exec_id, trader, qty FROM electronx.trader_fills") == [("E1", "alice", 1)]
+    fills_with_trader = (
+        "SELECT f.exec_id, o.trader, f.qty FROM electronx.fills AS f "
+        "LEFT JOIN electronx.orders AS o ON o.cl_ord_id = f.cl_ord_id"
+    )
+    assert query(sql_server, fills_with_trader) == [("E1", "alice", 1)]
     assert query(sql_server, "SELECT type, trader, by_user FROM electronx.alerts ORDER BY stream_id") == [
         ("killswitch_on", None, "dropcopy"),
         ("trader_blocked", "dave", "riskmonitor"),

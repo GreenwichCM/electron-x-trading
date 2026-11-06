@@ -26,7 +26,7 @@ def main() -> None:
             print(f"{settings!r}")
             print(f"applied: {', '.join(applied) or 'none'}")
             print(f"pending: {', '.join(pending) or 'none'}")
-    except (ConfigError, MigrationError, DbError) as exc:
+    except (ConfigError, MigrationError, *DbError) as exc:  # DbError is a tuple of classes
         sys.exit(f"error: {exc}")
 
 

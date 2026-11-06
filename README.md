@@ -51,12 +51,14 @@ The simulator keeps resting orders across its own restarts, like the exchange.
 
 The recorder copies every order update, fill and alert into SQL Server. Redis keeps only the latest
 entries; SQL Server keeps everything. All tables and views are in their own `electronx` schema
-(`electronx.orders`, `electronx.trader_fills`, ...), so the database can be shared with other
+(`electronx.orders`, `electronx.fills`, ...), so the database can be shared with other
 applications. Schema changes are numbered files in `packages/db/src/trading_db/migrations`, applied
 by the `migrate` command above (`status` lists them).
 
     docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -U sa -P "$(grep MSSQL_SA_PASSWORD .env | cut -d= -f2-)" \
-        -d trading -Q "SELECT TOP 10 exec_time, trader, symbol, side, qty, price FROM electronx.trader_fills ORDER BY exec_time DESC"
+        -d trading -Q "SELECT TOP 10 f.exec_time, o.trader, f.symbol, f.side, f.qty, f.price FROM electronx.fills AS f LEFT JOIN electronx.orders AS o ON o.cl_ord_id = f.cl_ord_id ORDER BY f.exec_time DESC"
+
+Fills come from drop copy and carry the ClOrdID, not the trader; the join with `electronx.orders` adds it.
 
 To use another SQL Server (for example a shared company database), point `DB_HOST`, `DB_PORT`,
 `DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/recorder/.env` at it and run `migrate`. For a

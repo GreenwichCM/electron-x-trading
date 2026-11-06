@@ -16,9 +16,9 @@ GO
 -- Read and write the platform's data
 GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA::electronx TO trading_app;
 
--- Run `python -m trading_db migrate`: create and change tables and views in the electronx schema.
--- (CREATE TABLE and CREATE VIEW are database-wide permissions, but they only take effect in a
--- schema the login may ALTER, which is just this one.) Revoke between releases if you prefer.
-GRANT CREATE TABLE, CREATE VIEW TO trading_app;
+-- Run `python -m trading_db migrate`: create and change tables in the electronx schema.
+-- (CREATE TABLE is a database-wide permission, but it only takes effect in a schema the login
+-- may ALTER, which is just this one.) Revoke between releases if you prefer.
+GRANT CREATE TABLE TO trading_app;
 GRANT ALTER, REFERENCES ON SCHEMA::electronx TO trading_app;
 GO

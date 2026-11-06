@@ -11,8 +11,9 @@ from pymssql import _mssql
 
 from .settings import DbSettings
 
-# Every error the driver raises, for `except DbError:`. The second kind is pymssql's low-level one,
-# raised for example by rollback() on a connection the server has dropped.
+# Every error the driver raises. The second kind is pymssql's low-level one, raised for example by
+# rollback() on a connection the server has dropped. It is a tuple: write `except DbError:`, or
+# `except (OtherError, *DbError):` alongside other exceptions (a tuple inside a tuple is an error).
 DbError = (pymssql.Error, _mssql.MSSQLException)
 Connection = pymssql.Connection
 
