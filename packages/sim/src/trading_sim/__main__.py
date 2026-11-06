@@ -42,7 +42,7 @@ async def main() -> None:
     await md_gateway.start(host=host, port=md_port)
     await oe_gateway.start(host=host, port=oe_port)
     md = SimMarketData(md_gateway, INSTRUMENTS)
-    SimOrderEntry(oe_gateway, md, drop_copy_senders={dc_sender})
+    SimOrderEntry(oe_gateway, md, drop_copy_senders={dc_sender}, state_path=state_dir / "orders.json")
     log = logging.getLogger("sim")
     log.info("market data: %s / %s on port %d", md_sender, password, md_port)
     log.info("order entry: %s and drop copy: %s, password %s, on port %d", oe_sender, dc_sender, password, oe_port)

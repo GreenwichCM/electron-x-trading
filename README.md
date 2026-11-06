@@ -35,6 +35,14 @@ Only one copy of orderentry and of dropcopy may run at a time; a second one refu
 Then open http://localhost:5173 and sign in as a test user. Ctrl-C stops all services.
 To run only some: `uv run honcho start sim marketdata`.
 
+## Restarts
+
+Any service can be stopped and started again on its own. orderentry saves its orders and positions
+to `var/oe/orders.json` every second and replays the rest from the Redis `orders` stream, then the
+exchange resends whatever happened while it was down. Orders still live from before a weekly
+sequence reset (Sunday 06:15 UTC) are cancelled, because what happened to them cannot be confirmed.
+The simulator keeps resting orders across its own restarts, like the exchange.
+
 ## Start again from a clean slate
 
 Positions, sequence numbers and order history live in `var/` and in Redis. To wipe them all

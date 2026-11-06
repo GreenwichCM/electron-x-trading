@@ -11,7 +11,8 @@ from decimal import Decimal
 from trading_core import KillSwitchState, TraderBlock
 from trading_fix import FixMessage, FixSession, SessionError, utc_timestamp
 
-from .orders import FROM_ORD_STATUS, SIDE_TO_FIX, TIF_TO_FIX, Order, Status, now_iso
+from .orders import FROM_ORD_STATUS, LIVE, SIDE_TO_FIX, TIF_TO_FIX, Order, Status, now_iso
+from .recovery import Recovered
 from .risk import Instrument, RiskLimits, Throttle, check_order
 from .sink import OrderSink
 
@@ -58,8 +59,49 @@ class OrderEntryApp:
         self._before_cancel: dict[str, Status] = {}
         self.kill_switch = KillSwitchState()
         self.blocks: dict[str, TraderBlock] = {}  # trader -> why they may not trade
+        self.changes = 0  # goes up on every order update; the state file is saved when it moves
+        self._unconfirmed: set[str] = set()  # restored from an earlier FIX week, still to be cancelled
         self._ids = itertools.count(1)
-        self._id_prefix = f"T{int(time.time()):x}"
+        self._id_prefix = f"T{time.time_ns() // 1_000_000:x}"  # milliseconds: unique even after a quick restart
+
+    # ---- restart -----------------------------------------------------------------------------
+
+    def restore(self, rec: Recovered, from_earlier_week: bool = False) -> None:
+        """Take over the orders and positions of the previous run (call before the session starts)."""
+        self.orders = dict(rec.orders)
+        self.positions = dict(rec.positions)
+        live = [o for o in self.orders.values() if o.live]
+        log.info(
+            "restored %d orders (%d live) and %d positions; %d updates replayed from the orders stream",
+            len(self.orders),
+            len(live),
+            len(self.positions),
+            rec.replayed,
+        )
+        # A cancel sent just before the restart may never have left: send those again.
+        self._unconfirmed = {o.cl_ord_id for o in live if o.status == Status.PENDING_CANCEL}
+        if from_earlier_week and live:
+            self._unconfirmed = {o.cl_ord_id for o in live}
+            log.warning(
+                "%d live orders are from before the weekly reset and cannot be confirmed: cancelling them",
+                len(live),
+            )
+
+    def cancel_unconfirmed(self) -> None:
+        """Called about once a second: send one cancel for each restored order that needs it (from an
+        earlier FIX week, or with a cancel in flight at the restart). The exchange either cancels it or
+        answers that it does not know it; both close it here."""
+        if not self._unconfirmed or not self._logged_on():
+            return
+        for cl in list(self._unconfirmed):
+            order = self.orders.get(cl)
+            if order is None or not order.live:
+                self._unconfirmed.discard(cl)
+                continue
+            if not self.throttle.allow(is_cancel=True):
+                return  # the rest go out on the next call
+            self._unconfirmed.discard(cl)
+            self._send_cancel(order)
 
     # ---- requests from the api -------------------------------------------------------------
 
@@ -187,23 +229,33 @@ class OrderEntryApp:
 
     def _on_execution_report(self, msg: FixMessage) -> None:
         cl = msg.get(11, "")
-        order = self.orders.get(self._cancel_ids.get(cl, cl))
-        if order is None:
-            log.warning("ExecutionReport for unknown order %s (from an earlier run?)", cl)
-            return
         exec_type = msg.get(150, "")
-        if exec_type == "F":
-            last_qty = msg.get_int(32)
-            sign = 1 if order.side == "BUY" else -1
+        # A cancel's report carries the cancel's own ClOrdID in 11 and the order's in OrigClOrdID(41);
+        # after a restart only the second is known.
+        order = self.orders.get(self._cancel_ids.get(cl, cl)) or self.orders.get(msg.get(41, ""))
+        if order is None:
+            if exec_type == "F":
+                log.error("fill for unknown order %s: not in our positions (dropcopy will show the difference)", cl)
+            else:
+                log.warning("ExecutionReport for unknown order %s", cl)
+            return
+        cum_qty = msg.get_int(14, order.cum_qty)
+        status = FROM_ORD_STATUS.get(msg.get(39, ""), order.status)
+        if cum_qty < order.cum_qty or (not order.live and status in LIVE):
+            log.info("ignoring an older ExecutionReport for %s (%s, %d filled)", order.cl_ord_id, status, cum_qty)
+            return
+        if cum_qty > order.cum_qty:  # by the change in filled qty, so a report seen twice counts once
+            filled = cum_qty - order.cum_qty
             key = (order.trader, order.symbol)
-            self.positions[key] = self.positions.get(key, 0) + sign * last_qty
-            log.info("fill %s %d @ %s", cl, last_qty, msg.get(31))
+            self.positions[key] = self.positions.get(key, 0) + (filled if order.side == "BUY" else -filled)
+        if exec_type == "F":
+            log.info("fill %s %d @ %s", cl, msg.get_int(32), msg.get(31))
         order_id = msg.get(37, "")
         self._update(
             order,
-            status=FROM_ORD_STATUS.get(msg.get(39, ""), order.status),
+            status=status,
             order_id=order_id if order_id and order_id != "NONE" else order.order_id,
-            cum_qty=msg.get_int(14, order.cum_qty),
+            cum_qty=cum_qty,
             avg_px=msg.get_float(6, order.avg_px),
             text=msg.get(58, order.text if exec_type != "F" else ""),
         )
@@ -213,6 +265,10 @@ class OrderEntryApp:
         if order is None:
             return
         log.info("cancel of %s rejected: %s", order.cl_ord_id, msg.get(58))
+        if msg.get(102) == "1":  # CxlRejReason 1 = unknown order: it is not live at the exchange
+            self._before_cancel.pop(order.cl_ord_id, None)
+            self._update(order, status=Status.CANCELED, text=f"not at the exchange ({msg.get(58, 'unknown order')})")
+            return
         previous = self._before_cancel.pop(order.cl_ord_id, order.status)
         status = FROM_ORD_STATUS.get(msg.get(39, ""), previous)
         self._update(order, status=status if status != Status.REJECTED else previous, text=msg.get(58, ""))
@@ -279,4 +335,6 @@ class OrderEntryApp:
         self._publish(order)
 
     def _publish(self, order: Order) -> None:
+        order.version += 1
+        self.changes += 1
         self.sink.publish(order.to_dict())

@@ -15,6 +15,7 @@ import asyncio
 import itertools
 import logging
 import random
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -74,6 +75,7 @@ class SimMarketData:
         self.on_fill: FillListener | None = None
         self.rng = random.Random(seed)
         self._ids = itertools.count(1)
+        self._run = format(time.time_ns() // 1_000_000, "x")  # keeps ids unique across simulator restarts
         self._pending: dict[str, list[Fields]] = {}
         for symbol in self.books:
             for k in range(1, self.BOOK_LEVELS + 1):
@@ -82,7 +84,9 @@ class SimMarketData:
         self._pending.clear()  # nobody is subscribed yet
 
     def new_id(self, prefix: str) -> str:
-        return f"{prefix}{next(self._ids)}"
+        """OrderIDs, ExecIDs and trade ids, unique like the real exchange's: downstream services
+        deduplicate fills by ExecID, so a restarted simulator must never reuse one."""
+        return f"{prefix}{self._run}-{next(self._ids)}"
 
     # ---- book queries ----------------------------------------------------------------------
 

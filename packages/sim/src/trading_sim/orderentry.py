@@ -8,15 +8,20 @@ Follows the ElectronX rules the OMS depends on:
   * rejects come back as ExecutionReport 150=8, unknown cancels as OrderCancelReject [9]
   * every ExecutionReport is also copied to the drop copy sessions, which share this port and may
     not send orders themselves
+  * resting orders survive a restart of the simulator (with a `state_path`), as they would at the
+    exchange, until the weekly reset
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
-from trading_fix import FixMessage, utc_timestamp
+from trading_fix import FixMessage, fix_week_start, utc_timestamp
 
 from .gateway import Fields, SimGateway, SimSession
 from .marketdata import BID, BUY, OFFER, SELL, RestingOrder, SimMarketData, business_reject
@@ -52,14 +57,22 @@ class ClientOrder:
 class SimOrderEntry:
     """Attach to the order entry SimGateway; shares the book of `md`."""
 
-    def __init__(self, gateway: SimGateway, md: SimMarketData, drop_copy_senders: Iterable[str] = ()):
+    def __init__(
+        self,
+        gateway: SimGateway,
+        md: SimMarketData,
+        drop_copy_senders: Iterable[str] = (),
+        state_path: Path | None = None,
+    ):
         self.gateway = gateway
         self.md = md
         self.drop_copy_senders = set(drop_copy_senders)
+        self.state_path = state_path
         gateway.on_app_message = self._on_message
         md.on_fill = self._on_resting_fill
         self.orders: dict[str, ClientOrder] = {}  # OrderID -> order
         self.by_cl_ord_id: dict[tuple[str, str], ClientOrder] = {}  # (SenderCompID, ClOrdID) -> order
+        self._load()
 
     # ---- requests --------------------------------------------------------------------------
 
@@ -75,6 +88,7 @@ class SimOrderEntry:
         else:
             business_reject(session, msg, 3, "Unsupported Message Type")
         self.md.flush()
+        self._save()
 
     def _new_order(self, session: SimSession, msg: FixMessage) -> None:
         cl = msg.get(11, "")
@@ -191,6 +205,7 @@ class SimOrderEntry:
         order = self.orders.get(resting.order_id)
         if order is not None:
             self._fill(order, qty, ticks)
+            self._save()
 
     def _fill(self, order: ClientOrder, qty: int, ticks: int) -> None:
         order.cum_qty += qty
@@ -244,3 +259,35 @@ class SimOrderEntry:
         for sender in self.drop_copy_senders:
             # Kept for resend even while the drop copy session is disconnected, like on the real gateway.
             self.gateway.session(sender).send("8", list(body))
+
+    # ---- resting orders across simulator restarts ------------------------------------------
+
+    def _save(self) -> None:
+        if self.state_path is None:
+            return
+        resting = [asdict(o) for o in self.orders.values() if o.leaves]
+        data = {"week": fix_week_start().isoformat(), "orders": resting}
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, self.state_path)
+
+    def _load(self) -> None:
+        if self.state_path is None or not self.state_path.exists():
+            return
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        if data.get("week") != fix_week_start().isoformat():
+            log.info("weekly reset since the simulator last ran: client orders from last week are gone")
+            return
+        for fields in data.get("orders", []):
+            order = ClientOrder(**fields)
+            if order.symbol not in self.md.books:
+                continue
+            self.orders[order.order_id] = order
+            self.by_cl_ord_id[(order.sender, order.cl_ord_id)] = order
+            side = BID if order.side == BUY else OFFER
+            self.md.add_order(
+                order.symbol, side, order.ticks, order.leaves, owner=order.sender, order_id=order.order_id
+            )
+        self.md.flush()
+        log.info("restored %d resting client orders", len(self.orders))

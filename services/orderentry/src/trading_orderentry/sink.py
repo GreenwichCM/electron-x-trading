@@ -42,6 +42,7 @@ class RedisOrderSink:
 
     def __init__(self, redis: Redis):
         self.redis = redis
+        self.last_id: str | None = None  # stream id of the last update written; see recovery.py
         self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
     def publish(self, order: dict[str, Any]) -> None:
@@ -55,7 +56,8 @@ class RedisOrderSink:
             data = json.dumps(order)
             while True:
                 try:
-                    await self.redis.xadd(STREAM, {"data": data}, maxlen=STREAM_MAXLEN, approximate=True)
+                    entry_id = await self.redis.xadd(STREAM, {"data": data}, maxlen=STREAM_MAXLEN, approximate=True)
+                    self.last_id = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
                     break
                 except (RedisError, OSError) as exc:
                     log.warning("Redis unavailable (%s); retrying in %.0fs", exc, self.RETRY_S)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -56,6 +56,15 @@ class Order:
     text: str = ""
     created: str = field(default_factory=now_iso)
     updated: str = field(default_factory=now_iso)
+    version: int = 0  # +1 on every published update, so an older copy never overwrites a newer one
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Order:
+        """The inverse of to_dict (extra keys such as `leaves` are ignored)."""
+        names = {f.name for f in fields(cls)}
+        order = cls(**{k: v for k, v in data.items() if k in names})
+        order.status = Status(order.status)
+        return order
 
     @property
     def live(self) -> bool:

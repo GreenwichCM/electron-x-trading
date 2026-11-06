@@ -7,6 +7,8 @@ import json
 import logging
 import signal
 import sys
+import time
+from pathlib import Path
 
 import uvicorn
 from redis.asyncio import Redis
@@ -16,11 +18,15 @@ from trading_fix import AlreadyRunning, FixSession, SeqStore, build_ssl_context,
 
 from .app import OrderEntryApp
 from .control import create_control_app
+from .recovery import Recovered, recover, save_state
 from .risk import Instrument, Throttle
 from .settings import ConfigError, Settings
 from .sink import RedisOrderSink
 
 log = logging.getLogger("oe")
+
+SAVE_EVERY_S = 1.0
+SAVE_AT_LEAST_EVERY_S = 60.0  # even with no changes, so the file shows when orderentry last ran
 
 
 async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 30.0) -> None:
@@ -46,7 +52,32 @@ async def watch_kill_switch(redis: Redis, oe: OrderEntryApp, every_s: float = 0.
             oe.set_blocks(decode_blocks(await redis.hgetall(BLOCKS_KEY)))
         except (RedisError, OSError) as exc:
             log.warning("could not read the kill switch or trader blocks: %s", exc)
+        oe.cancel_unconfirmed()
         await asyncio.sleep(every_s)
+
+
+async def recover_when_possible(redis: Redis, path: Path) -> Recovered:
+    """Orders and positions of the previous run. Waits for Redis: without the stream's tail, positions
+    could be wrong, so orderentry does not connect to the exchange until this has worked."""
+    while True:
+        try:
+            return await recover(redis, path)
+        except (RedisError, OSError) as exc:
+            log.warning("cannot read the orders stream to recover (%s); retrying", exc)
+            await asyncio.sleep(1.0)
+
+
+def save(path: Path, oe: OrderEntryApp, sink: RedisOrderSink, rec: Recovered) -> None:
+    save_state(path, oe.orders.values(), oe.positions, sink.last_id or rec.stream_id)
+
+
+async def save_regularly(path: Path, oe: OrderEntryApp, sink: RedisOrderSink, rec: Recovered) -> None:
+    saved_changes, saved_at = -1, 0.0
+    while True:
+        await asyncio.sleep(SAVE_EVERY_S)
+        if oe.changes != saved_changes or time.monotonic() - saved_at > SAVE_AT_LEAST_EVERY_S:
+            saved_changes, saved_at = oe.changes, time.monotonic()
+            save(path, oe, sink, rec)
 
 
 async def main() -> None:
@@ -60,7 +91,22 @@ async def main() -> None:
     except AlreadyRunning as exc:
         sys.exit(f"orderentry is already running: {exc}")
 
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    stop_task = asyncio.create_task(stop.wait(), name="stop")
+
     redis = Redis.from_url(settings.redis_url)
+    state_path = settings.state_dir / "orders.json"
+    recovering = asyncio.create_task(recover_when_possible(redis, state_path), name="recover")
+    await asyncio.wait({recovering, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    if not recovering.done():
+        recovering.cancel()
+        await redis.aclose()
+        return
+    rec = recovering.result()
+
     sink = RedisOrderSink(redis)
     oe = OrderEntryApp(
         sink,
@@ -71,6 +117,7 @@ async def main() -> None:
         trader_ids=settings.trader_ids,
         capacity=settings.capacity,
     )
+    oe.restore(rec, from_earlier_week=rec.from_earlier_week())
     ssl_context = build_ssl_context(settings.tls) if settings.tls else None
     server_name = settings.tls.server_name if settings.tls else None
     store = SeqStore(settings.state_dir / "seq.json")  # sequence numbers survive restarts
@@ -85,12 +132,7 @@ async def main() -> None:
             log_level="warning",
         )
     )
-    control.install_signal_handlers = lambda: None  # we handle signals below
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+    control.install_signal_handlers = lambda: None  # we handle signals above
 
     tasks = {
         asyncio.create_task(sink.run(), name="sink"),
@@ -98,8 +140,8 @@ async def main() -> None:
         asyncio.create_task(control.serve(), name="control"),
         asyncio.create_task(refresh_instruments(redis, oe), name="instruments"),
         asyncio.create_task(watch_kill_switch(redis, oe), name="killswitch"),
+        asyncio.create_task(save_regularly(state_path, oe, sink, rec), name="save"),
     }
-    stop_task = asyncio.create_task(stop.wait(), name="stop")
     done, _ = await asyncio.wait(tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in done - {stop_task}:
         if task.exception() is not None:
@@ -110,9 +152,10 @@ async def main() -> None:
     await session.stop()
     await sink.close()
     for task in tasks:
-        if task.get_name() in ("instruments", "killswitch"):
+        if task.get_name() in ("instruments", "killswitch", "save"):
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    save(state_path, oe, sink, rec)  # after the sink has written everything, so nothing is replayed twice
     await redis.aclose()
 
 
