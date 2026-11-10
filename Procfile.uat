@@ -1,0 +1,11 @@
+# ElectronX demo (UAT): `uv run honcho -f Procfile.uat start`. No simulator: the services connect to
+# ElectronX. Each loads its usual .env, then services/uat.env (its own Redis and SQL databases), then its
+# own uat.env (the exchange's address, passwords and certificates). See "ElectronX demo (UAT)" in README.md.
+# Stop the development stack (Procfile) first: both use the api and web ports.
+marketdata: uv run --env-file services/marketdata/.env --env-file services/uat.env --env-file services/marketdata/uat.env python -m trading_marketdata
+orderentry: uv run --env-file services/db.env --env-file services/orderentry/.env --env-file services/uat.env --env-file services/orderentry/uat.env python -m trading_orderentry
+dropcopy: uv run --env-file services/dropcopy/.env --env-file services/uat.env --env-file services/dropcopy/uat.env python -m trading_dropcopy
+riskmonitor: uv run --env-file services/db.env --env-file services/riskmonitor/.env --env-file services/uat.env python -m trading_riskmonitor
+recorder: uv run --env-file services/db.env --env-file services/recorder/.env --env-file services/uat.env python -m trading_recorder
+api: uv run --env-file services/db.env --env-file services/api/.env --env-file services/uat.env python -m trading_api
+web: npm --prefix web run dev

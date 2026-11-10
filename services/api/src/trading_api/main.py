@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from trading_core import ALERTS_STREAM, BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, TraderBlock, decode_blocks
+from trading_db import follow_rules
 
 from .auth import Authenticator, DevAuthenticator, User
 from .hub import ClientFeed, MarketDataHub
@@ -83,6 +84,9 @@ def create_app(
             asyncio.create_task(app.state.hub.run(), name="md-hub"),
             asyncio.create_task(app.state.orders.run(), name="order-hub"),
         ]
+        if settings.db is not None:  # who each ElectronX id belongs to, for orders from the ElectronX screen
+            rules = follow_rules(settings.db, app.state.orders.set_rules, settings.rules_refresh_s, appname="api")
+            tasks.append(asyncio.create_task(rules, name="rules"))
         yield
         for task in tasks:
             task.cancel()
@@ -166,7 +170,12 @@ def create_app(
 
     @app.get("/api/orders")
     async def list_orders(user: Annotated[User, Depends(current_user)]) -> list[dict[str, Any]]:
-        return await call_orderentry(oe.list(order_scope(user)))
+        """Orders sent from this app (from orderentry) and orders entered on the ElectronX screen (from
+        the drop copy, `source` "electronx"), newest first."""
+        scope = order_scope(user)
+        ours = await call_orderentry(oe.list(scope))
+        both = [*ours, *app.state.orders.screen_orders(scope)]
+        return sorted(both, key=lambda o: o.get("created") or "", reverse=True)
 
     @app.post("/api/orders")
     async def new_order(
@@ -397,6 +406,8 @@ def create_app(
         hub: OrderHub = app.state.orders
         feed = hub.connect(lambda order: scope is None or order.get("trader") == scope)
         try:
+            for order in hub.screen_orders(scope):
+                feed.put(order["cl_ord_id"], order, replace=False)
             try:
                 for order in await oe.list(scope):
                     feed.put(order["cl_ord_id"], order, replace=False)

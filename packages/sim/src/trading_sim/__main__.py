@@ -10,6 +10,9 @@ days go by. Without it there are three contracts that never expire.
 SIM_EXPIRING_IN_S=300 adds an ERCOT Houston contract that stops trading 5 minutes after the start and
 settles SIM_SETTLE_AFTER_S (30) seconds later, to try out expiry and settlement.
 
+SIM_TLS_CERT, SIM_TLS_KEY and SIM_TLS_CA make both gateways require mutual TLS like the real ones: the
+simulator's own certificate and key, and the CA that client certificates must be signed by.
+
 SIM_SCREEN_USERS (comma-separated ElectronX trader ids) has those traders place a small order on the
 "ElectronX screen" every SIM_SCREEN_EVERY_S (60) seconds: no FIX session sends it, only the drop copy
 reports it, as for orders traders enter on the exchange's own screen.
@@ -22,6 +25,7 @@ import logging
 import os
 import random
 import signal
+import ssl
 import time
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +51,18 @@ def expiring_instrument(in_s: float, settle_after_s: float) -> SimInstrument:
     local = datetime.fromtimestamp(ends, ZoneInfo("America/Chicago"))
     symbol = f"BFUT500-ERCOT-HB_HOUSTON-{local:%y%m%d}-{local.hour + 1:02d}"
     return SimInstrument(symbol, fair=41.0, last_trade_at=ends, settle_after_s=settle_after_s)
+
+
+def tls_context() -> ssl.SSLContext | None:
+    """Mutual TLS, if SIM_TLS_CERT is set: clients must present a certificate signed by SIM_TLS_CA."""
+    cert = os.environ.get("SIM_TLS_CERT", "").strip()
+    if not cert:
+        return None
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH, cafile=os.environ["SIM_TLS_CA"])
+    ctx.load_cert_chain(cert, os.environ["SIM_TLS_KEY"])
+    ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
 
 
 async def keep_rolling(md: SimMarketData, rng: random.Random, every_s: float = 60.0) -> None:
@@ -93,8 +109,9 @@ async def main() -> None:
     md_gateway = SimGateway({md_sender: password})  # market data resets sequence numbers on every logon
     # Order entry and drop copy keep them all week, so the simulator saves them across its own restarts.
     oe_gateway = SimGateway({oe_sender: password, dc_sender: password}, state_path=state_dir / "oe-gateway.json")
-    await md_gateway.start(host=host, port=md_port)
-    await oe_gateway.start(host=host, port=oe_port)
+    tls = tls_context()
+    await md_gateway.start(host=host, port=md_port, ssl_context=tls)
+    await oe_gateway.start(host=host, port=oe_port, ssl_context=tls)
     md = SimMarketData(md_gateway, instruments)
     if full:
         md.active_per_step = int(os.environ.get("SIM_ACTIVE_PER_STEP", "40"))
@@ -102,6 +119,8 @@ async def main() -> None:
     log.info("market data: %s / %s on port %d", md_sender, password, md_port)
     log.info("order entry: %s and drop copy: %s, password %s, on port %d", oe_sender, dc_sender, password, oe_port)
     log.info("%d contracts listed%s", len(instruments), " (full universe, rolling)" if full else "")
+    if tls is not None:
+        log.info("mutual TLS required on both ports")
     for inst in instruments:
         if inst.last_trade_at is not None and not full:
             ends = datetime.fromtimestamp(inst.last_trade_at).astimezone().isoformat(timespec="seconds")

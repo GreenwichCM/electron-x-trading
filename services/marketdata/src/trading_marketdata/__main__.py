@@ -35,7 +35,12 @@ async def main() -> None:
 
     redis = Redis.from_url(settings.redis_url)
     publisher = RedisPublisher(redis)
-    app = MarketDataApp(publisher, settings.symbols, keep_unsettled_s=settings.keep_unsettled_s)
+    app = MarketDataApp(
+        publisher,
+        settings.symbols,
+        keep_unsettled_s=settings.keep_unsettled_s,
+        subscribe_per_s=settings.subscribe_per_s,
+    )
     ssl_context = build_ssl_context(settings.tls) if settings.tls else None
     server_name = settings.tls.server_name if settings.tls else None
     session = FixSession(settings.session, app, SeqStore(), ssl_context, server_name)

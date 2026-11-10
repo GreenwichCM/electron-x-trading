@@ -29,16 +29,17 @@ def run(coro):
 
 
 class Harness:
-    def __init__(self, symbols=(), instruments=INSTRUMENTS):
+    def __init__(self, symbols=(), instruments=INSTRUMENTS, **app_options):
         self.symbols = symbols
         self.instruments = instruments
+        self.app_options = app_options
 
     async def __aenter__(self):
         self.gw = SimGateway({SENDER: "sim"})
         self.md = SimMarketData(self.gw, self.instruments, seed=7)
         port = await self.gw.start()
         self.pub = MemoryPublisher()
-        self.app = MarketDataApp(self.pub, self.symbols)
+        self.app = MarketDataApp(self.pub, self.symbols, **self.app_options)
         cfg = SessionConfig(
             name="md",
             host="127.0.0.1",
@@ -183,8 +184,22 @@ def test_new_contracts_are_picked_up_and_old_ones_retired():
 def test_a_long_security_list_comes_in_fragments():
     async def scenario():
         many = [SimInstrument(f"BFUT500-ERCOT-HB_T{n}-261231-15") for n in range(450)]  # three fragments of 200
-        async with Harness(instruments=many) as h:
+        async with Harness(instruments=many, subscribe_per_s=1000) as h:
             await wait_for(lambda: len(h.app.subscribed) == 450, timeout=10)
             assert len(h.pub.instruments) == 450
+
+    run(scenario())
+
+
+def test_subscriptions_go_out_a_batch_a_second():
+    async def scenario():
+        many = [SimInstrument(f"BFUT500-ERCOT-HB_T{n}-261231-15") for n in range(25)]
+        async with Harness(instruments=many, subscribe_per_s=10) as h:
+            requests = lambda: sum(1 for m in h.gw.session(SENDER).received if m.msg_type == "V")  # noqa: E731
+            await wait_for(lambda: requests() == 10)
+            await asyncio.sleep(0.5)
+            assert requests() == 10  # the next ten wait a second
+            await wait_for(lambda: requests() == 25, timeout=4)
+            await wait_for(lambda: all(h.live(i.symbol) for i in many))
 
     run(scenario())

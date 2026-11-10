@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import os
+import ssl
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -112,9 +113,10 @@ class SimGateway:
         self.port = 0
         self._load()
 
-    async def start(self, host: str = "127.0.0.1", port: int = 0) -> int:
-        """Start listening. Port 0 picks a free port; the chosen one is returned."""
-        self._server = await asyncio.start_server(self._handle, host, port)
+    async def start(self, host: str = "127.0.0.1", port: int = 0, ssl_context: ssl.SSLContext | None = None) -> int:
+        """Start listening. Port 0 picks a free port; the chosen one is returned. With `ssl_context` the
+        clients must speak TLS (the real gateways require mutual TLS; tests use it)."""
+        self._server = await asyncio.start_server(self._handle, host, port, ssl=ssl_context)
         self.port = self._server.sockets[0].getsockname()[1]
         log.info("sim gateway listening on %s:%d", host, self.port)
         return self.port

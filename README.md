@@ -72,6 +72,10 @@ the trader's ElectronX id (TargetSubID 57), so they are not lost:
 * The recorder keeps screen orders in `electronx.orders` and `electronx.order_events` with
   `source = 'electronx'` and the ElectronX id in `exchange_user`; every fill has `exchange_user` too. Our
   own orders have `source = 'app'`.
+* The order blotter shows them next to ours, marked ElectronX, to the trader they belong to (risk and
+  management see all). They can be cancelled only on the ElectronX screen. The other way round needs
+  nothing from us: orders sent from here are on the same trading account, so the ElectronX screen
+  shows them.
 
 To try it, give dave an ElectronX id, then have the simulator place screen orders for it:
 
@@ -79,7 +83,45 @@ To try it, give dave an ElectronX id, then have the simulator place screen order
 
     SIM_SCREEN_USERS=firms/huron/users/dave uv run honcho start
 
-`SIM_SCREEN_EVERY_S` (60) sets how often. The order blotter shows only orders sent from this app.
+`SIM_SCREEN_EVERY_S` (60) sets how often.
+
+## ElectronX demo (UAT)
+
+The same services connect to the ElectronX demo environment instead of the simulator. `Procfile.uat`
+starts them without the simulator. Each service loads its usual `.env`, then `services/uat.env` (its own
+Redis database and SQL database, `trading_uat`, so nothing mixes with the simulator's), then its own
+`uat.env` with the exchange's address, passwords and certificates. All of these and the certificates are
+git-ignored: never commit them. Stop the development stack first; both use the api and web ports.
+
+1. Certificates: put the three files ElectronX sent in `certs/` (`ca.crt`, `client.crt`, `client.key`),
+   then `chmod 600 certs/client.key`.
+2. Settings: copy `services/uat.env.example` to `services/uat.env`, and in `services/marketdata`,
+   `services/orderentry` and `services/dropcopy` copy `uat.env.example` to `uat.env`. Fill in the three
+   passwords and `OE_DEFAULT_TRADER` from the ElectronX FIX connectivity sheet.
+3. Check the way to the exchange without logging on (no FIX password is used):
+
+       uv run --env-file services/marketdata/.env --env-file services/marketdata/uat.env python -m trading_fix.check MD
+       uv run --env-file services/orderentry/.env --env-file services/orderentry/uat.env python -m trading_fix.check OE
+       uv run --env-file services/dropcopy/.env --env-file services/dropcopy/uat.env python -m trading_fix.check DC
+
+   A TCP failure means ElectronX has not allowed this machine's public IP address yet, or a firewall
+   blocks the port. A TLS failure means the certificate files are not the right ones.
+4. Database: `migrate` and `seed-dev` with `--env-file services/db.env --env-file services/uat.env`, then
+   give each test user an Authorized Trading User's email from the sheet as `exchange_trader_id`.
+5. Read only first: `uv run honcho -f Procfile.uat start marketdata dropcopy riskmonitor recorder api web`.
+   Prices fill the price screen; demo books are sometimes CLOSED, so use "Trading now".
+6. Then everything: `uv run honcho -f Procfile.uat start`. Place a one-lot order far from the market, see
+   it acknowledged, cancel it.
+7. On the ElectronX demo screen, place a one-lot order far from the market, then cancel it. It must appear
+   in the blotter marked ElectronX, as the trader with that email, first as new, then as cancelled.
+
+ElectronX allows one connection per SenderCompID, and keeps sequence numbers all week (they reset on
+Sunday at 06:15 UTC); orderentry and dropcopy keep theirs in `var/uat`. Marketdata subscribes to at most
+`MD_SUBSCRIBE_PER_S` (50) contracts a second, so with thousands listed the screen fills over a minute.
+
+For production, ElectronX reviews the order entry session's activity in the demo environment against
+minimum message counts (logons, heartbeats, resend requests, rejects, orders, cancels). They were met on
+21 October 2026 by the earlier client (electron-x-oms, `exoms conformance`).
 
 ## History in SQL Server
 
@@ -176,6 +218,9 @@ Positions, sequence numbers and order history live in `var/` and in Redis. To wi
 
     rm -rf var
     docker compose exec redis redis-cli del orders fills alerts screen_orders killswitch dc:positions risk:snapshot risk:blocked risk:sod
+
+For the ElectronX demo, the same with `redis-cli -n 1` and `rm -rf var/uat`; but at the exchange orders
+and sequence numbers live on, so only do this after the weekly reset.
 
 This keeps the history in SQL Server. To wipe that too: `docker compose down -v`, `docker compose up -d`,
 then run `migrate` again.

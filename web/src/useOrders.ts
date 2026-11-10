@@ -8,7 +8,8 @@ export type OrderStatus =
   | "filled"
   | "pending_cancel"
   | "canceled"
-  | "rejected";
+  | "rejected"
+  | "expired";
 
 export type Order = {
   cl_ord_id: string;
@@ -26,6 +27,8 @@ export type Order = {
   text: string;
   created: string;
   updated: string;
+  source?: "app" | "electronx"; // electronx: entered on the ElectronX screen, seen through the drop copy
+  exchange_user?: string; // the trader's ElectronX id, on orders from the ElectronX screen
 };
 
 export const LIVE: OrderStatus[] = ["pending_new", "new", "partially_filled", "pending_cancel"];

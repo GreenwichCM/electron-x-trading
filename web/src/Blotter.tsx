@@ -5,7 +5,8 @@ import { LIVE, type Order } from "./useOrders";
 const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString();
 const label = (status: string) => status.replace("_", " ");
 
-/** Orders, newest first. Risk and management see everyone's, with a Trader column. */
+/** Orders, newest first: those sent from here and those entered on the ElectronX screen (marked
+ *  ElectronX; they can be cancelled only there). Risk and management see everyone's, with a Trader column. */
 export default function Blotter({ orders, user }: { orders: Order[]; user: User }) {
   const [error, setError] = useState("");
   const showTrader = user.permissions.includes("orders.view.all");
@@ -44,8 +45,15 @@ export default function Blotter({ orders, user }: { orders: Order[]; user: User 
           {orders.map((o) => (
             <tr key={o.cl_ord_id}>
               <td className="time">{fmtTime(o.created)}</td>
-              {showTrader && <td>{o.trader}</td>}
-              <td className="symbol">{o.symbol}</td>
+              {showTrader && <td>{o.trader || o.exchange_user}</td>}
+              <td className="symbol">
+                {o.symbol}
+                {o.source === "electronx" && (
+                  <span className="pill source" title={`Entered on the ElectronX screen by ${o.exchange_user}`}>
+                    ElectronX
+                  </span>
+                )}
+              </td>
               <td className={o.side === "BUY" ? "buy" : "sell"}>{o.side}</td>
               <td className="num">{o.qty}</td>
               <td className="num">{o.price.toFixed(2)}</td>
@@ -56,7 +64,11 @@ export default function Blotter({ orders, user }: { orders: Order[]; user: User 
               </td>
               <td className="text">{o.text}</td>
               <td>
-                {canTrade && o.trader === user.id && LIVE.includes(o.status) && o.status !== "pending_cancel" && (
+                {canTrade &&
+                  o.source !== "electronx" &&
+                  o.trader === user.id &&
+                  LIVE.includes(o.status) &&
+                  o.status !== "pending_cancel" && (
                   <button className="link" onClick={() => cancel(o)}>
                     Cancel
                   </button>

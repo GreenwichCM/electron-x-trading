@@ -5,6 +5,7 @@ import json
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
 from trading_api import OrderEntryError, OrderEntryUnavailable, Settings, create_app
+from trading_core.rules import Trader, TradingRules
 
 SETTINGS = Settings(dev_login=True, dev_secret="test-secret-" + "x" * 32)
 SYMBOL = "BFUT500-ERCOT-HB_NORTH-261231-15"
@@ -107,3 +108,59 @@ def test_order_websocket_shows_each_user_what_they_may_see():
             assert alice.receive_json()["data"]["cl_ord_id"] == "A1"  # dave's order never reaches alice
             seen = {bob.receive_json()["data"]["cl_ord_id"] for _ in range(2)}
             assert seen == {"D1", "A1"}
+
+
+def screen_order(cl, user, version=1, status="new"):
+    return {
+        "cl_ord_id": cl,
+        "order_id": "O" + cl,
+        "trader": "",
+        "exchange_user": user,
+        "source": "electronx",
+        "symbol": SYMBOL,
+        "side": "SELL",
+        "qty": 2,
+        "price": 47.0,
+        "tif": "DAY",
+        "status": status,
+        "cum_qty": 0,
+        "avg_px": 0.0,
+        "text": "",
+        "created": "20261110-14:03:56.123456789",
+        "updated": "20261110-14:03:56.123456789",
+        "version": version,
+    }
+
+
+def test_orders_from_the_electronx_screen_are_in_the_blotter_for_their_trader():
+    redis, app = make_app(FakeOrderEntry([order("A0", "alice", "filled")]))
+    with TestClient(app) as client:
+        alice_token, alice = headers(client, "alice")
+        _, bob = headers(client, "bob")
+        client.portal.call(app.state.orders.ready.wait)
+        app.state.orders.set_rules(
+            TradingRules(traders={"alice": Trader("alice", "a@x.com")}, entitlements=frozenset(), limits={})
+        )
+        with client.websocket_connect("/ws/orders") as ws:
+            ws.send_json({"type": "auth", "token": alice_token})
+            assert ws.receive_json()["type"] == "welcome"
+            assert ws.receive_json()["data"]["cl_ord_id"] == "A0"
+            client.portal.call(redis.xadd, "screen_orders", {"data": json.dumps(screen_order("UI-1", "z@x.com"))})
+            client.portal.call(redis.xadd, "screen_orders", {"data": json.dumps(screen_order("UI-2", "a@x.com"))})
+            row = ws.receive_json()["data"]  # only alice's own: the other ElectronX id is nobody's here
+            assert (row["cl_ord_id"], row["trader"], row["source"]) == ("UI-2", "alice", "electronx")
+            assert row["created"] == "2026-11-10T14:03:56.123+00:00" and row["leaves"] == 2
+
+        client.portal.call(
+            redis.xadd, "screen_orders", {"data": json.dumps(screen_order("UI-2", "a@x.com", 2, "canceled"))}
+        )
+        client.portal.call(
+            redis.xadd, "screen_orders", {"data": json.dumps(screen_order("UI-2", "a@x.com", 1))}
+        )  # late
+        for _ in range(100):
+            mine = client.get("/api/orders", headers=alice).json()
+            if any(o["cl_ord_id"] == "UI-2" and o["status"] == "canceled" for o in mine):
+                break
+        assert [(o["cl_ord_id"], o["status"]) for o in mine] == [("UI-2", "canceled"), ("A0", "filled")]
+        everyone = {o["cl_ord_id"]: o for o in client.get("/api/orders", headers=bob).json()}
+        assert set(everyone) == {"A0", "UI-1", "UI-2"} and everyone["UI-1"]["trader"] == ""

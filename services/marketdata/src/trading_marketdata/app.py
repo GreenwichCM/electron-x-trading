@@ -9,12 +9,16 @@ subscribed until its settlement price has arrived (PJM settles the next day), `k
 passed, or the exchange rejects the subscription; then it is retired: unsubscribed, forgotten here, and
 its Redis keys left to expire.
 
+Subscriptions go out at most `subscribe_per_s` a second: the exchange throttles a session that sends
+too fast, and a burst of thousands of requests at every logon would look like runaway activity.
+
 The Snapshot API (snapshot.py), when configured, adds the exchange's marks (the day-ahead price) to each
 book, and its settlement prices stand in until FIX market data sends one.
 """
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import time
@@ -36,6 +40,7 @@ INDICATIVE = {"3", "5"}  # OpenCloseSettlFlag(286): expected entry, theoretical 
 AGGRESSOR = {"1": "BUY", "2": "SELL"}
 DEPTH_LEVELS = 10
 KEEP_UNSETTLED_S = 3 * 24 * 3600
+SUBSCRIBE_PER_S = 50
 SAME_PRICE = 0.01  # FIX and the Snapshot API may round a settlement price differently
 
 
@@ -69,6 +74,7 @@ class MarketDataApp:
         symbols: Collection[str] = (),
         keep_unsettled_s: float = KEEP_UNSETTLED_S,
         clock: Callable[[], float] = time.time,
+        subscribe_per_s: int = SUBSCRIBE_PER_S,
     ):
         self.publisher = publisher
         self.wanted = set(symbols)
@@ -86,6 +92,9 @@ class MarketDataApp:
         self._list_req = ""
         self._ids = itertools.count(1)
         self._disagree: set[str] = set()  # symbols whose two settlement prices differ, already reported
+        self.subscribe_per_s = subscribe_per_s
+        self._to_subscribe: list[str] = []  # waiting their turn
+        self._next_batch: asyncio.TimerHandle | None = None
 
     # ---- SessionApp ------------------------------------------------------------------------
 
@@ -94,9 +103,11 @@ class MarketDataApp:
             book.clear()
             book.stale = True
         self.subscribed.clear()  # a new connection starts with no subscriptions
+        self._stop_subscribing()
         self.request_list(session)
 
     def on_disconnect(self, session: FixSession) -> None:
+        self._stop_subscribing()
         for book in self.books.values():
             book.stale = True
             self._publish(book)
@@ -193,11 +204,36 @@ class MarketDataApp:
             final = (self.settlements.get(symbol) or {}).get("final")
             if final or now - since >= self.keep_unsettled_s:
                 self._retire(session, symbol, "settled" if final else "never settled")
-        new = [s for s in self.instruments if s not in self.subscribed]
-        for symbol in new:
-            self._subscribe(session, symbol)
+        waiting = set(self._to_subscribe)
+        new = [s for s in self.instruments if s not in self.subscribed and s not in waiting]
         if new:
-            log.info("subscribed to %d instruments (%d in all)", len(new), len(self.subscribed))
+            self._to_subscribe += new
+            log.info("subscribing to %d new instruments, %d a second", len(new), self.subscribe_per_s)
+            if self._next_batch is None:
+                self._subscribe_batch(session)
+
+    def _subscribe_batch(self, session: FixSession) -> None:
+        """Subscribe to the next `subscribe_per_s` instruments; the rest a second later."""
+        self._next_batch = None
+        if not session.logged_on:
+            return
+        batch, self._to_subscribe = (
+            self._to_subscribe[: self.subscribe_per_s],
+            self._to_subscribe[self.subscribe_per_s :],
+        )
+        for symbol in batch:
+            if symbol in self.instruments and symbol not in self.subscribed:
+                self._subscribe(session, symbol)
+        if self._to_subscribe:
+            self._next_batch = asyncio.get_running_loop().call_later(1.0, self._subscribe_batch, session)
+        elif batch:
+            log.info("subscribed to %d instruments", len(self.subscribed))
+
+    def _stop_subscribing(self) -> None:
+        if self._next_batch is not None:
+            self._next_batch.cancel()
+            self._next_batch = None
+        self._to_subscribe.clear()
 
     def _subscribe(self, session: FixSession, symbol: str) -> None:
         req_id = f"MD-{next(self._ids)}"
