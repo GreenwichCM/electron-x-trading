@@ -2,6 +2,9 @@
 
 Market data on SIM_MD_PORT (13001). Order entry and drop copy share SIM_OE_PORT (13101), as on the
 real exchange, and all of them share one order book.
+
+SIM_EXPIRING_IN_S=300 adds an ERCOT Houston contract that stops trading 5 minutes after the start and
+settles SIM_SETTLE_AFTER_S (30) seconds later, to try out expiry and settlement.
 """
 
 from __future__ import annotations
@@ -10,7 +13,10 @@ import asyncio
 import logging
 import os
 import signal
+import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .gateway import SimGateway
 from .marketdata import SimInstrument, SimMarketData
@@ -21,6 +27,14 @@ INSTRUMENTS = [
     SimInstrument("BFUT500-ERCOT-HB_WEST-261231-15", fair=38.0),
     SimInstrument("BFUT100-PJM-WESTERN_HUB-261231-15", fair=52.0, high=100.0),
 ]
+
+
+def expiring_instrument(in_s: float, settle_after_s: float) -> SimInstrument:
+    """A contract whose trading ends `in_s` seconds from now, named for the ERCOT hour it ends in."""
+    ends = time.time() + in_s
+    local = datetime.fromtimestamp(ends, ZoneInfo("America/Chicago"))
+    symbol = f"BFUT500-ERCOT-HB_HOUSTON-{local:%y%m%d}-{local.hour + 1:02d}"
+    return SimInstrument(symbol, fair=41.0, last_trade_at=ends, settle_after_s=settle_after_s)
 
 
 async def main() -> None:
@@ -35,17 +49,25 @@ async def main() -> None:
     password = os.environ.get("SIM_PASSWORD", "sim")
     interval = float(os.environ.get("SIM_INTERVAL_S", "0.5"))
     state_dir = Path(os.environ.get("SIM_STATE_DIR", "var/sim"))
+    instruments = list(INSTRUMENTS)
+    if os.environ.get("SIM_EXPIRING_IN_S", "").strip():
+        settle_after = float(os.environ.get("SIM_SETTLE_AFTER_S", "30"))
+        instruments.append(expiring_instrument(float(os.environ["SIM_EXPIRING_IN_S"]), settle_after))
 
     md_gateway = SimGateway({md_sender: password})  # market data resets sequence numbers on every logon
     # Order entry and drop copy keep them all week, so the simulator saves them across its own restarts.
     oe_gateway = SimGateway({oe_sender: password, dc_sender: password}, state_path=state_dir / "oe-gateway.json")
     await md_gateway.start(host=host, port=md_port)
     await oe_gateway.start(host=host, port=oe_port)
-    md = SimMarketData(md_gateway, INSTRUMENTS)
+    md = SimMarketData(md_gateway, instruments)
     SimOrderEntry(oe_gateway, md, drop_copy_senders={dc_sender}, state_path=state_dir / "orders.json")
     log = logging.getLogger("sim")
     log.info("market data: %s / %s on port %d", md_sender, password, md_port)
     log.info("order entry: %s and drop copy: %s, password %s, on port %d", oe_sender, dc_sender, password, oe_port)
+    for inst in instruments:
+        if inst.last_trade_at is not None:
+            ends = datetime.fromtimestamp(inst.last_trade_at).astimezone().isoformat(timespec="seconds")
+            log.info("%s stops trading at %s", inst.symbol, ends)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

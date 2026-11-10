@@ -3,7 +3,7 @@
 Redis layout:
   * PUBLISH md.<symbol>        every book update (JSON), for live subscribers
   * SET     md:last:<symbol>   the latest book update, so a service that starts later has a value at once
-  * SET     instrument:<symbol> reference data (tick size, lot size, limits)
+  * SET     instrument:<symbol> reference data (tick size, lot size, limits, last trade and expiration times)
 """
 
 from __future__ import annotations

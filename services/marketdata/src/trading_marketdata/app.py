@@ -1,4 +1,8 @@
-"""The market data session app: reference data, subscriptions, one OrderBook per symbol, publishing."""
+"""The market data session app: reference data, subscriptions, one OrderBook per symbol, publishing.
+
+Besides the book and trades, it keeps each contract's state (TradingSessionID(336): OPEN, EXPIRED, ...)
+and its settlement price (MDEntryType(269)=6), and publishes both with the book.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +20,8 @@ from .publisher import Publisher
 
 log = logging.getLogger("md")
 
-TRADE = "2"  # MDEntryType(269)
+TRADE, SETTLEMENT = "2", "6"  # MDEntryType(269)
+INDICATIVE = {"3", "5"}  # OpenCloseSettlFlag(286): expected entry, theoretical price; anything else is final
 AGGRESSOR = {"1": "BUY", "2": "SELL"}
 DEPTH_LEVELS = 10
 
@@ -27,6 +32,15 @@ def _px(entry: dict[int, str]) -> float | None:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def _entry_time(entry: dict[int, str]) -> str:
+    """MDEntryDate(272) and MDEntryTime(273), both UTC, as ISO 8601; now if they are missing."""
+    try:
+        when = datetime.strptime(f"{entry[272]}-{entry[273][:15]}", "%Y%m%d-%H:%M:%S.%f")
+    except KeyError, ValueError:
+        return _now()
+    return when.replace(tzinfo=UTC).isoformat(timespec="milliseconds")
 
 
 class MarketDataApp:
@@ -41,6 +55,7 @@ class MarketDataApp:
         self.books: dict[str, OrderBook] = {}
         self.instruments: dict[str, Instrument] = {}
         self.last_trades: dict[str, dict[str, Any]] = {}
+        self.settlements: dict[str, dict[str, Any]] = {}
         self._listing: list[Instrument] = []
         self._ids = itertools.count(1)
 
@@ -76,7 +91,7 @@ class MarketDataApp:
     def _on_security_list(self, session: FixSession, msg: FixMessage) -> None:
         if msg.get(560, "0") not in ("0", "2"):
             log.error("security list request %s failed: SecurityRequestResult=%s", msg.get(320), msg.get(560))
-        self._listing += [Instrument.from_security_list(e) for e in msg.groups(146, 55)]
+        self._listing += [Instrument.from_security_list(e) for e in msg.group_fields(146, 55)]
         if msg.get(893, "Y") != "Y":
             return  # more fragments to come
         listed = {i.symbol: i for i in self._listing}
@@ -94,10 +109,11 @@ class MarketDataApp:
                     (262, f"MD-{next(self._ids)}"),
                     (263, "1"),  # snapshot + updates
                     (264, "0"),  # full depth
-                    (267, "3"),
+                    (267, "4"),
                     (269, BID),
                     (269, OFFER),
                     (269, TRADE),
+                    (269, SETTLEMENT),
                     (146, "1"),
                     (55, symbol),
                 ],
@@ -110,6 +126,8 @@ class MarketDataApp:
             return
         book.clear()
         for i, entry in enumerate(msg.groups(268, 269)):
+            if entry.get(269) == SETTLEMENT:
+                self._settlement(book.symbol, entry)
             book.apply(NEW, entry.get(278) or f"W{i}", entry.get(269, ""), _px(entry), float(entry.get(271) or 0))
             self._track_state(book.symbol, entry)
         book.stale = False
@@ -130,12 +148,27 @@ class MarketDataApp:
                     "trade_id": entry.get(1003, ""),
                     "time": _now(),
                 }
+            elif entry.get(269) == SETTLEMENT:
+                if entry.get(279) != "2":  # not a delete
+                    self._settlement(book.symbol, entry)
             else:
                 book.apply(entry[279], entry.get(278, ""), entry.get(269, ""), _px(entry), float(entry.get(271) or 0))
             self._track_state(book.symbol, entry)
             touched[book.symbol] = book
         for book in touched.values():
             self._publish(book)
+
+    def _settlement(self, symbol: str, entry: dict[int, str]) -> None:
+        price = _px(entry)
+        if price is None:
+            return
+        flag = entry.get(286, "")
+        final = flag not in INDICATIVE
+        previous = self.settlements.get(symbol)
+        if previous is not None and (previous["price"], previous["final"]) == (price, final):
+            return  # the same price again (a new snapshot): keep when it was first published
+        self.settlements[symbol] = {"price": price, "final": final, "flag": flag, "time": _entry_time(entry)}
+        log.info("%s settlement %s (%s)", symbol, price, "final" if final else "indicative")
 
     def _track_state(self, symbol: str, entry: dict[int, str]) -> None:
         state = entry.get(336)
@@ -149,6 +182,7 @@ class MarketDataApp:
 
     def payload(self, book: OrderBook) -> dict[str, Any]:
         bids, asks = book.depth(BID, DEPTH_LEVELS), book.depth(OFFER, DEPTH_LEVELS)
+        inst = self.instruments.get(book.symbol)
         return {
             "symbol": book.symbol,
             "stale": book.stale,
@@ -160,6 +194,8 @@ class MarketDataApp:
             "bids": bids,
             "asks": asks,
             "last_trade": self.last_trades.get(book.symbol),
+            "state": inst.state if inst else "",
+            "settlement": self.settlements.get(book.symbol),  # {price, final, flag, time} or None
             "time": _now(),
         }
 

@@ -12,7 +12,7 @@ from trading_riskmonitor import SOD_KEY, RiskEngine, TradingDay, load_sod, publi
 from trading_riskmonitor.settings import Settings
 
 X = "BFUT500-ERCOT-HB_NORTH-261231-15"
-EXPIRING = "BFUT500-ERCOT-HB_NORTH-261110-15"  # trading ends 2026-11-10 15:00 New York (20:00 UTC)
+EXPIRING = "BFUT500-ERCOT-HB_NORTH-261110-15"  # trading ends 2026-11-10 15:00 Central (21:00 UTC)
 DB_ENV = {"DB_HOST": "127.0.0.1", "DB_NAME": "x", "DB_USER": "u", "DB_PASSWORD": "p"}
 
 
@@ -145,11 +145,11 @@ def test_a_fill_with_no_time_takes_the_time_it_reached_redis():
 
 
 def test_an_expired_contract_keeps_its_last_mark():
-    clock = Clock(utc(2026, 11, 10, 19, 59))  # 14:59 New York
+    clock = Clock(utc(2026, 11, 10, 20, 59))  # 14:59 Central
     e = engine(clock)
     e.on_fill(fill("E1", "BUY", 1, 40.0, symbol=EXPIRING))
     e.on_book(book(41.0, 42.0, symbol=EXPIRING))
-    clock.now = utc(2026, 11, 10, 20, 0)  # 15:00: trading has ended
+    clock.now = utc(2026, 11, 10, 21, 0)  # 15:00: trading has ended
     e.on_book(book(10.0, 11.0, symbol=EXPIRING))  # a dead book's quotes are ignored
     p = e.snapshot()["traders"]["alice"]["positions"][EXPIRING]
     assert (p["mark"], p["expired"]) == (41.5, True)

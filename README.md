@@ -112,9 +112,17 @@ Positions held when the day begins are valued from their start-of-day mark, the 
 that moment. Riskmonitor keeps these marks in Redis (`risk:sod`), so a restart during the day keeps
 them. If riskmonitor was down at the roll, the first mark after it starts stands in, shown as late.
 
-A contract stops trading at the end of its hour. From then on its book is ignored and it keeps its
-last mark, shown as awaiting settlement. Symbol times are taken to be New York time
-(`trading_core.EXPIRY_TZ`); to be confirmed against the ElectronX spec.
+A contract stops trading at the last trade time the exchange sends in its SecurityList, or else at the
+end of its hour. A symbol's date and hour are in the ISO's own time zone: Central for ERCOT and SPP,
+Eastern for PJM, NYISO and ISO-NE, Pacific for CAISO, and EST all year for MISO; the repeated hour
+when clocks fall back is `X2`. From then on its book is ignored and it keeps its last mark, shown as
+awaiting settlement, until the exchange sends the settlement price on market data (MDEntryType 6).
+The position is then closed at that price: its P&L becomes realized and it no longer counts against
+the position limit. An indicative settlement price is only used as the mark.
+
+To try this with the simulator, `SIM_EXPIRING_IN_S=300 uv run honcho start` adds an ERCOT Houston
+contract that stops trading 5 minutes after the start and settles 30 seconds later
+(`SIM_SETTLE_AFTER_S`).
 
 ## Start again from a clean slate
 

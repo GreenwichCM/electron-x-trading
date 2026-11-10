@@ -47,9 +47,14 @@ class FixMessage:
     def groups(self, count_tag: int, first_tag: int) -> list[dict[int, str]]:
         """Split the repeating group introduced by `count_tag` into one dict per entry.
 
-        Each entry starts at `first_tag`. Assumes the group runs to the end of the body.
+        Each entry starts at `first_tag`. Assumes the group runs to the end of the body. A tag that
+        repeats inside an entry (a nested group) keeps its last value; use group_fields for those.
         """
-        entries: list[dict[int, str]] = []
+        return [dict(entry) for entry in self.group_fields(count_tag, first_tag)]
+
+    def group_fields(self, count_tag: int, first_tag: int) -> list[list[tuple[int, str]]]:
+        """Like groups(), but each entry keeps all its fields in order."""
+        entries: list[list[tuple[int, str]]] = []
         in_group = False
         for tag, value in self.fields:
             if tag == count_tag:
@@ -58,9 +63,9 @@ class FixMessage:
                 break
             elif in_group:
                 if tag == first_tag:
-                    entries.append({})
+                    entries.append([])
                 if entries:
-                    entries[-1][tag] = value
+                    entries[-1].append((tag, value))
         return entries
 
     def __repr__(self) -> str:

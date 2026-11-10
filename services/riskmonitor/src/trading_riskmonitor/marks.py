@@ -1,6 +1,7 @@
 """Choosing the price each position is valued at (the "mark").
 
-In order, the first that applies (settlement and snapshot marks join this list later):
+For a live contract, in order, the first that applies (expired and settled contracts are handled in
+engine.py):
   1. mid of a two-sided book whose spread is no wider than `max_spread`
   2. the last trade, if it lies inside the current bid and ask
   3. the previous mark, flagged stale

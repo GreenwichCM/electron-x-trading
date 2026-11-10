@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 from trading_fix import FixSession, SeqStore, SessionConfig
 from trading_marketdata import MarketDataApp, MemoryPublisher
@@ -28,12 +29,13 @@ def run(coro):
 
 
 class Harness:
-    def __init__(self, symbols=()):
+    def __init__(self, symbols=(), instruments=INSTRUMENTS):
         self.symbols = symbols
+        self.instruments = instruments
 
     async def __aenter__(self):
         self.gw = SimGateway({SENDER: "sim"})
-        self.md = SimMarketData(self.gw, INSTRUMENTS, seed=7)
+        self.md = SimMarketData(self.gw, self.instruments, seed=7)
         port = await self.gw.start()
         self.pub = MemoryPublisher()
         self.app = MarketDataApp(self.pub, self.symbols)
@@ -122,5 +124,28 @@ def test_disconnect_marks_books_stale_and_reconnect_refreshes_them():
             h.md.move_fair(SYMBOLS[0], 3)  # the market moves while we are away
             await wait_for(lambda: all(h.live(s) for s in SYMBOLS), timeout=8)
             assert all(h.matches_sim(s) for s in SYMBOLS)
+
+    run(scenario())
+
+
+def test_trading_times_state_and_settlement_are_published():
+    async def scenario():
+        ends = time.time() + 600
+        ending = SimInstrument("BFUT100-ERCOT-HB_HOUSTON-261110-15", fair=42.0, high=100.0, last_trade_at=ends)
+        ending.settle_after_s = 0
+        async with Harness(instruments=[*INSTRUMENTS, ending]) as h:
+            s = ending.symbol
+            await wait_for(lambda: h.live(s))
+            inst = h.pub.instruments[s]
+            when = datetime.fromtimestamp(int(ends), UTC).isoformat()
+            assert inst["last_trade_time"] == inst["expiration_time"] == when
+            assert h.pub.instruments[SYMBOLS[0]]["last_trade_time"] is None
+            assert h.pub.books[s]["state"] == "OPEN" and h.pub.books[s]["settlement"] is None
+
+            ending.last_trade_at = time.time() - 1  # trading ends, and the settlement follows at once
+            h.md.step()
+            await wait_for(lambda: (h.pub.books[s]["settlement"] or {}).get("price") == 42.0)
+            p = h.pub.books[s]
+            assert p["state"] == "EXPIRED" and p["settlement"]["final"] and p["bid"] is None and p["ask"] is None
 
     run(scenario())

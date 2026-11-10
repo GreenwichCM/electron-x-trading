@@ -70,6 +70,7 @@ class SimOrderEntry:
         self.state_path = state_path
         gateway.on_app_message = self._on_message
         md.on_fill = self._on_resting_fill
+        md.on_expire = self._on_expire
         self.orders: dict[str, ClientOrder] = {}  # OrderID -> order
         self.by_cl_ord_id: dict[tuple[str, str], ClientOrder] = {}  # (SenderCompID, ClOrdID) -> order
         self._load()
@@ -206,6 +207,16 @@ class SimOrderEntry:
         if order is not None:
             self._fill(order, qty, ticks)
             self._save()
+
+    def _on_expire(self, symbol: str, resting: RestingOrder) -> None:
+        order = self.orders.get(resting.order_id)
+        if order is None or not order.leaves:
+            return
+        order.status = CANCELED
+        session = self.gateway.sessions.get(order.sender)
+        if session is not None:
+            self._report(session, order, EXEC_CANCELED, text="Instrument expired")
+        self._save()
 
     def _fill(self, order: ClientOrder, qty: int, ticks: int) -> None:
         order.cum_qty += qty

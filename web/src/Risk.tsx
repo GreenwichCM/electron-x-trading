@@ -12,7 +12,8 @@ type PositionRisk = Pnl & {
   mark_source: string;
   mark_stale: boolean;
   mark_age_s: number | null;
-  expired: boolean; // past its hour: kept at its last mark until settlement
+  expired: boolean; // no longer trades: kept at its last mark until settlement
+  settled: boolean; // closed at the exchange's final settlement price
   sod_qty: number; // held when the trading day began
   sod_mark: number | null;
   sod_mark_late: boolean; // not taken at the roll (riskmonitor was down, or no mark yet)
@@ -94,6 +95,20 @@ function BlockButton({ trader, blocked, onChange }: { trader: string; blocked: b
 }
 
 function MarkFrom({ p }: { p: PositionRisk }) {
+  if (p.settled) {
+    return (
+      <td className="qty" title="Closed at the exchange's final settlement price; the P&L is realized">
+        settled
+      </td>
+    );
+  }
+  if (p.expired && p.mark_source === "indicative settlement") {
+    return (
+      <td className="stale-mark" title="Trading has ended; the exchange has sent an indicative settlement price">
+        expired, indicative settlement
+      </td>
+    );
+  }
   if (p.expired) {
     return (
       <td className="stale-mark" title="Trading in this contract has ended; it keeps its last mark until settlement">
@@ -238,7 +253,7 @@ export default function Risk({ user }: { user: User }) {
                 <tr key={`${trader}-${symbol}`}>
                   {seesAll && <td>{trader}</td>}
                   <td className="symbol">{symbol}</td>
-                  <td className="num">{signed(p.qty)}</td>
+                  <td className="num">{p.settled ? `${signed(p.qty)} → 0` : signed(p.qty)}</td>
                   <td className="num">{p.qty ? p.avg_px.toFixed(2) : ""}</td>
                   <td className="num">{p.mark == null ? "–" : p.mark.toFixed(2)}</td>
                   <MarkFrom p={p} />

@@ -4,6 +4,8 @@ Messages follow the ElectronX layouts:
   * SecurityListRequest [x] -> SecurityList [y] with tick size, lot size and price limits
   * MarketDataRequest [V] -> snapshot [W], then incremental refreshes [X] while subscribed
   * every resting order is its own entry, keyed by MDEntryID(278); trades are MDEntryType(269)=2
+  * a contract with a last trade time expires then: its orders are cancelled and its state becomes
+    EXPIRED; `settle_after_s` later its settlement price is sent as MDEntryType(269)=6
 
 The book is shared with the simulated order entry gateway, so client orders show up in market data
 and trade against the synthetic liquidity.
@@ -26,7 +28,7 @@ from .gateway import Fields, SimGateway, SimSession
 
 log = logging.getLogger("sim.md")
 
-BID, OFFER, TRADE = "0", "1", "2"  # MDEntryType(269)
+BID, OFFER, TRADE, SETTLEMENT = "0", "1", "2", "6"  # MDEntryType(269)
 NEW, CHANGE, DELETE = "0", "1", "2"  # MDUpdateAction(279)
 BUY, SELL = "1", "2"  # Side / AggressorSide(2446)
 
@@ -40,6 +42,9 @@ class SimInstrument:
     low: float = 0.0
     high: float = 500.0
     state: str = "OPEN"
+    last_trade_at: float | None = None  # time.time() when trading stops; None: never
+    settle_after_s: float = 30.0  # the settlement price follows this long after trading stops
+    settlement: float | None = None
 
 
 @dataclass
@@ -53,11 +58,17 @@ class RestingOrder:
 
 #: Called when a client's resting order is filled: (symbol, order, filled qty, price in ticks).
 FillListener = Callable[[str, RestingOrder, int, int], None]
+#: Called when a contract expires with a client's order still resting: (symbol, order).
+ExpiryListener = Callable[[str, RestingOrder], None]
 
 
 def _now_parts() -> tuple[str, str]:
     now = datetime.now(UTC)
     return now.strftime("%Y%m%d"), now.strftime("%H:%M:%S.%f")
+
+
+def _fix_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y%m%d-%H:%M:%S.%f") + "000"  # nanoseconds, like EXI
 
 
 class SimMarketData:
@@ -73,6 +84,7 @@ class SimMarketData:
         self.fair: dict[str, int] = {i.symbol: round(i.fair / i.tick) for i in instruments}
         self.subscriptions: dict[str, dict[str, str]] = {}  # SenderCompID -> {symbol: MDReqID}
         self.on_fill: FillListener | None = None
+        self.on_expire: ExpiryListener | None = None
         self.rng = random.Random(seed)
         self._ids = itertools.count(1)
         self._run = format(time.time_ns() // 1_000_000, "x")  # keeps ids unique across simulator restarts
@@ -176,9 +188,50 @@ class SimMarketData:
         else:
             self.add_order(symbol, side, ticks, qty)
 
+    def expire(self, symbol: str) -> None:
+        """Trading has ended: cancel every resting order (telling order entry about client orders)."""
+        inst = self.instruments[symbol]
+        inst.state = "EXPIRED"
+        for order in list(self.books[symbol].values()):
+            self.cancel_order(symbol, order.order_id)
+            if order.owner is not None and self.on_expire is not None:
+                self.on_expire(symbol, order)
+        log.info("%s expired", symbol)
+
+    def settle(self, symbol: str) -> None:
+        """Publish the settlement price: fair value, bounded by the contract's floor and ceiling."""
+        inst = self.instruments[symbol]
+        inst.settlement = min(max(self.fair[symbol] * inst.tick, inst.low), inst.high)
+        d, t = _now_parts()
+        self._pending.setdefault(symbol, []).append(
+            [
+                (279, NEW),
+                (269, SETTLEMENT),
+                (55, symbol),
+                (270, f"{inst.settlement:.2f}"),
+                (272, d),
+                (273, t),
+                (336, inst.state),
+            ]
+        )
+        log.info("%s settled at %.2f", symbol, inst.settlement)
+
+    def _expiries(self) -> None:
+        now = time.time()
+        for symbol, inst in self.instruments.items():
+            if inst.last_trade_at is None or now < inst.last_trade_at:
+                continue
+            if inst.state == "OPEN":
+                self.expire(symbol)
+            if inst.settlement is None and now >= inst.last_trade_at + inst.settle_after_s:
+                self.settle(symbol)
+
     def step(self) -> None:
-        """One random change per instrument, then send the batched updates."""
+        """One random change per open instrument, then send the batched updates."""
+        self._expiries()
         for symbol in self.books:
+            if self.instruments[symbol].state != "OPEN":
+                continue
             r = self.rng.random()
             synthetic = [o for o in self.books[symbol].values() if o.owner is None]
             if r < 0.35:
@@ -242,6 +295,12 @@ class SimMarketData:
                 (48, i.symbol),
                 (22, "8"),
                 (167, "EVENT"),
+            ]
+            if i.last_trade_at is not None:
+                when = [(866, _fix_time(i.last_trade_at)[:8]), (1145, _fix_time(i.last_trade_at))]
+                body += [(864, "2"), (865, "7"), when[0], (868, "LastTradeDate"), when[1]]
+                body += [(865, "7"), when[0], (868, "ExpirationDate"), when[1]]
+            body += [
                 (969, str(i.tick)),
                 (562, str(i.lot)),
                 (1148, f"{i.low:.2f}"),
@@ -267,7 +326,10 @@ class SimMarketData:
     def _snapshot(self, session: SimSession, symbol: str, req_id: str) -> None:
         inst = self.instruments[symbol]
         orders = sorted(self.books[symbol].values(), key=lambda o: (o.side, -o.ticks if o.side == BID else o.ticks))
-        body: Fields = [(55, symbol), (262, req_id), (268, str(len(orders)))]
+        settled = (
+            [] if inst.settlement is None else [(269, SETTLEMENT), (270, f"{inst.settlement:.2f}"), (336, inst.state)]
+        )
+        body: Fields = [(55, symbol), (262, req_id), (268, str(len(orders) + bool(settled))), *settled]
         for o in orders:
             body += [
                 (269, o.side),

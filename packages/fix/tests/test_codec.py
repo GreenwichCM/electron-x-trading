@@ -1,5 +1,5 @@
 import pytest
-from trading_fix import FixParseError, FixParser, decode, encode
+from trading_fix import FixMessage, FixParseError, FixParser, decode, encode
 
 
 def test_encode_has_correct_length_and_checksum():
@@ -37,3 +37,13 @@ def test_parser_rejects_bad_checksum():
     raw[-2] = ord("9") if raw[-2] != ord("9") else ord("8")
     with pytest.raises(FixParseError):
         FixParser().feed(bytes(raw))
+
+
+def test_group_fields_keep_a_nested_group():
+    msg = FixMessage(
+        [(35, "y"), (146, "1"), (55, "S"), (864, "2"), (865, "7"), (868, "LastTradeDate"), (865, "7"),
+         (868, "ExpirationDate"), (969, "0.25")]
+    )  # fmt: skip
+    (entry,) = msg.group_fields(146, 55)
+    assert [v for t, v in entry if t == 868] == ["LastTradeDate", "ExpirationDate"]
+    assert msg.groups(146, 55)[0][868] == "ExpirationDate" and msg.groups(146, 55)[0][969] == "0.25"

@@ -11,8 +11,11 @@ fills, so redis_io keeps it in Redis and riskmonitor reloads it after a restart.
 start-of-day mark (riskmonitor was down at the roll, or the contract had no mark yet) takes the first
 mark it gets, flagged `sod_mark_late`.
 
-A contract stops trading at the end of its hour (Symbol.expires_at), after which its book is dead. It
-keeps its last mark, flagged `expired`, until its settlement price is known.
+A contract stops trading at its last trade time from the exchange's SecurityList, else at the end of
+its hour in the ISO's time zone (Symbol.expires_at), or when market data says it is EXPIRED. Its book
+is dead from then on, so it keeps its last mark, flagged `expired`, until the exchange publishes a
+settlement price on market data. A final settlement price closes the position at that price: its P&L
+becomes realized and it no longer counts against position limits. An indicative one is only a mark.
 
 Limits come from the trading rules in SQL Server (set_rules): each trader's max loss for the day, and
 the max position of each contract. A trader with no loss limit set shows no usage and is never blocked
@@ -37,6 +40,16 @@ from .positions import Position
 log = logging.getLogger("risk")
 
 
+ENDED_STATES = {"EXPIRED", "TERMINATED"}  # TradingSessionID(336)
+
+
+def _iso_time(value: Any) -> float | None:
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except TypeError, ValueError:
+        return None
+
+
 def _pct(used: float, limit: float) -> float:
     return round(100.0 * used / limit, 1) if limit else 0.0
 
@@ -53,6 +66,13 @@ def fix_time(value: str) -> float | None:
         except ValueError:
             continue
     return None
+
+
+@dataclass(frozen=True)
+class Settlement:
+    price: float
+    final: bool  # False: indicative (OpenCloseSettlFlag 3 or 5)
+    time: float  # when the exchange published it
 
 
 @dataclass(frozen=True)
@@ -113,6 +133,7 @@ class RiskEngine:
         self.books: dict[str, dict[str, Any]] = {}
         self.instruments: dict[str, dict[str, Any]] = {}
         self.marks: dict[str, Mark] = {}
+        self.settlements: dict[str, Settlement] = {}
         self.sod_marks: dict[str, SodMark] = {}
         self.sod_version = 0  # goes up whenever sod_marks change, so they get saved
         self._expiry: dict[str, float | None] = {}
@@ -143,6 +164,11 @@ class RiskEngine:
     def on_book(self, book: Mapping[str, Any]) -> None:
         self._roll()  # a new day's start-of-day marks are the marks before this update
         self.books[book["symbol"]] = dict(book)
+        settlement = book.get("settlement")
+        if settlement and settlement.get("price") is not None:
+            when = _iso_time(settlement.get("time")) or self.clock()
+            final = bool(settlement.get("final", True))
+            self.settlements[book["symbol"]] = Settlement(float(settlement["price"]), final, when)
         self._remark(book["symbol"])
 
     def set_rules(self, rules: TradingRules) -> None:
@@ -166,20 +192,42 @@ class RiskEngine:
     def _remark(self, symbol: str) -> None:
         now = self.clock()
         previous = self.marks.get(symbol)
+        settlement = self.settlements.get(symbol)
+        if settlement is not None:
+            source = "settlement" if settlement.final else "indicative settlement"
+            self.marks[symbol] = Mark(settlement.price, source, settlement.time)
+            return
         if self.expired(symbol, now) and previous is not None and previous.price is not None:
             return  # the book is dead: keep the last mark until settlement
         self.marks[symbol] = choose_mark(
             self.books.get(symbol), self.instruments.get(symbol), previous, now, self.max_spread
         )
 
-    def expired(self, symbol: str, now: float) -> bool:
+    def trading_ends(self, symbol: str) -> float | None:
+        """The exchange's last trade time, else its expiration time, else the end of the symbol's hour."""
+        instrument = self.instruments.get(symbol) or {}
+        for key in ("last_trade_time", "expiration_time"):
+            ends = _iso_time(instrument.get(key))
+            if ends is not None:
+                return ends
         if symbol not in self._expiry:
             try:
                 self._expiry[symbol] = Symbol.parse(symbol).expires_at.timestamp()
             except ValueError:
                 self._expiry[symbol] = None  # not an ElectronX symbol: never expires
-        expiry = self._expiry[symbol]
-        return expiry is not None and now >= expiry
+        return self._expiry[symbol]
+
+    def expired(self, symbol: str, now: float) -> bool:
+        if symbol in self.settlements:
+            return True
+        state = (self.books.get(symbol) or {}).get("state") or (self.instruments.get(symbol) or {}).get("state")
+        ends = self.trading_ends(symbol)
+        return state in ENDED_STATES or (ends is not None and now >= ends)
+
+    def settled(self, symbol: str) -> Settlement | None:
+        """The final settlement, if the exchange has published it."""
+        settlement = self.settlements.get(symbol)
+        return settlement if settlement is not None and settlement.final else None
 
     # ---- trading day -----------------------------------------------------------------------
 
@@ -232,13 +280,17 @@ class RiskEngine:
             sod = self._sod_mark(symbol) if h.sod_qty else None
             day = h.today_position(sod.price if sod else None)
             today = _pnl(day.realized, day.unrealized(price))
+            settled = self.settled(symbol)
+            if settled is not None:  # closed at the settlement price: all of it is realized
+                since_start, today = _pnl(since_start["total"], 0.0), _pnl(today["total"], 0.0)
             t = traders.setdefault(trader, {"positions": {}, **_pnl(0.0, 0.0), "today": _pnl(0.0, 0.0)})
             _add(t, since_start)
             _add(t["today"], today)
-            if h.since_start.qty:
+            if h.since_start.qty and settled is None:
                 desk_positions[symbol] = desk_positions.get(symbol, 0) + h.since_start.qty
-            if h.since_start.qty == 0 and h.sod_qty == 0 and not h.today:
-                continue  # closed out before today: counted in the totals, not listed
+            closed = h.since_start.qty == 0 and h.sod_qty == 0 and not h.today
+            if closed or (settled is not None and self.trading_day.day_of(settled.time) < self.today):
+                continue  # closed out or settled before today: counted in the totals, not listed
             t["positions"][symbol] = {
                 "qty": h.since_start.qty,
                 "avg_px": round(h.since_start.avg_px, 4),
@@ -247,6 +299,7 @@ class RiskEngine:
                 "mark_stale": mark.stale if mark else True,
                 "mark_age_s": round(now - mark.time, 1) if mark else None,
                 "expired": self.expired(symbol, now),
+                "settled": settled is not None,
                 "sod_qty": h.sod_qty,
                 "sod_mark": sod.price if sod else None,
                 "sod_mark_late": bool(h.sod_qty) and (sod is None or sod.late),
@@ -283,7 +336,8 @@ class RiskEngine:
         for symbol, p in t["positions"].items():
             limit = self.rules.limits_for(trader, symbol).max_position if self.rules else None
             if limit:
-                usage = {"used": abs(p["qty"]), "limit": limit, "pct": _pct(abs(p["qty"]), limit), "symbol": symbol}
+                used = 0 if p["settled"] else abs(p["qty"])  # a settled position is closed
+                usage = {"used": used, "limit": limit, "pct": _pct(used, limit), "symbol": symbol}
                 if worst is None or usage["pct"] > worst["pct"]:
                     worst = usage
         return worst
