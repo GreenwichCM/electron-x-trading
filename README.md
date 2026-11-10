@@ -14,7 +14,7 @@ https://claude.ai/artifact/K8bLZDVaUUFQRhkVMpqCSw
 | `services/marketdata` | MD session -> order books -> Redis |
 | `services/orderentry` | Pre-trade risk, throttle, OE session, internal order endpoint, kill switch |
 | `services/dropcopy` | The exchange's copy of every fill: positions, break detection, kill switch trip |
-| `services/riskmonitor` | Marks, P&L and limit usage per trader; blocks a trader who hits the loss limit |
+| `services/riskmonitor` | Marks, daily P&L and limit usage per trader; blocks a trader who hits the daily loss limit |
 | `services/recorder` | Copies orders, fills and alerts from Redis into SQL Server, permanently |
 | `services/api` | FastAPI: login, permissions, REST and WebSockets for the web app |
 | `web` | React + TypeScript trading UI |
@@ -100,13 +100,29 @@ should be able to write them). Examples:
     -- stop dave trading (his live orders stay; use Block on the dashboard to cancel them too)
     UPDATE electronx.traders SET active = 0 WHERE trader_id = N'dave';
 
+## Daily P&L
+
+The risk dashboard shows P&L for today's trading day, and since riskmonitor's first fill. ElectronX
+has no trading day of its own, so it is set in `services/riskmonitor/.env`: by default midnight to
+midnight New York time (`RISK_DAY_TZ=America/New_York`, `RISK_DAY_START=00:00`). The max loss in
+`electronx.limits` is a daily limit: it is checked against today's P&L. A block stays until risk lifts
+it, also across the day roll.
+
+Positions held when the day begins are valued from their start-of-day mark, the contract's mark at
+that moment. Riskmonitor keeps these marks in Redis (`risk:sod`), so a restart during the day keeps
+them. If riskmonitor was down at the roll, the first mark after it starts stands in, shown as late.
+
+A contract stops trading at the end of its hour. From then on its book is ignored and it keeps its
+last mark, shown as awaiting settlement. Symbol times are taken to be New York time
+(`trading_core.EXPIRY_TZ`); to be confirmed against the ElectronX spec.
+
 ## Start again from a clean slate
 
 Positions, sequence numbers and order history live in `var/` and in Redis. To wipe them all
 (development only), stop everything, then:
 
     rm -rf var
-    docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions risk:snapshot risk:blocked
+    docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions risk:snapshot risk:blocked risk:sod
 
 This keeps the history in SQL Server. To wipe that too: `docker compose down -v`, `docker compose up -d`,
 then run `migrate` again.

@@ -2,6 +2,7 @@
 
 from .instruments import (
     DATA_START_DATE,
+    EXPIRY_TZ,
     LOT_SIZE_MWH,
     MARKET_LAUNCH_DATES,
     NY_TZ,
@@ -19,6 +20,7 @@ __all__ = [
     "ALERTS_STREAM",
     "BLOCKS_KEY",
     "DATA_START_DATE",
+    "EXPIRY_TZ",
     "KILLSWITCH_KEY",
     "LOT_SIZE_MWH",
     "MARKET_LAUNCH_DATES",

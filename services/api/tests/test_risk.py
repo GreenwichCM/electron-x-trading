@@ -10,6 +10,7 @@ from trading_core import TraderBlock
 SETTINGS = Settings(dev_login=True, dev_secret="test-secret-" + "x" * 32)
 SNAPSHOT = {
     "time": "t",
+    "trading_day": {"day": "2026-11-10", "starts_at": "2026-11-10T00:00:00-05:00", "tz": "America/New_York"},
     "traders": {
         "alice": {"positions": {"X": {"qty": 2}}, "realized": 0.0, "unrealized": 5.0, "total": 5.0},
         "dave": {"positions": {"X": {"qty": -1}}, "realized": 0.0, "unrealized": -1.5, "total": -1.5},
@@ -40,7 +41,7 @@ def test_traders_see_only_their_own_risk_plus_desk_totals():
         client.portal.call(redis.set, "risk:snapshot", json.dumps(SNAPSHOT))
         alice = client.get("/api/risk", headers=headers(client, "alice")).json()
         assert set(alice["traders"]) == {"alice"}  # dave's row never reaches alice
-        assert alice["desk"]["total"] == 3.5
+        assert alice["desk"]["total"] == 3.5 and alice["trading_day"]["day"] == "2026-11-10"
         for user in ("bob", "carol"):
             everyone = client.get("/api/risk", headers=headers(client, user)).json()
             assert set(everyone["traders"]) == {"alice", "dave"}

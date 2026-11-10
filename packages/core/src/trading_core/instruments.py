@@ -15,6 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 NY_TZ = ZoneInfo("America/New_York")
 
+#: Time zone of the date and hour in a symbol. Assumed to be New York, like the exchange's data;
+#: confirm against the ElectronX spec during UAT.
+EXPIRY_TZ = NY_TZ
+
 
 class Market(StrEnum):
     ERCOT = "ERCOT"
@@ -106,6 +110,11 @@ class Symbol(BaseModel):
     def expiry(self) -> datetime:
         """Expiry as a naive datetime (``expiry_hour`` 24 rolls to next day 00:00)."""
         return datetime.combine(self.expiry_date, datetime.min.time()) + timedelta(hours=self.expiry_hour)
+
+    @property
+    def expires_at(self) -> datetime:
+        """When trading ends: the end of the contract hour, in ``EXPIRY_TZ`` (time-zone aware)."""
+        return self.expiry.replace(tzinfo=EXPIRY_TZ)
 
     def __str__(self) -> str:
         return self.raw

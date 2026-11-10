@@ -59,7 +59,7 @@ def test_loss_limit_breach():
     e.on_book(book(44.0, 45.0))  # mark 44.5: loss 11
     snap = e.snapshot()
     assert snap["traders"]["alice"]["limits"]["loss"]["pct"] == 110.0
-    assert "reached the limit" in e.breaches(snap)["alice"]
+    assert "reached the daily limit" in e.breaches(snap)["alice"]
 
 
 def test_limits_come_from_the_rules_per_trader_and_contract():

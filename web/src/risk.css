@@ -63,6 +63,11 @@ button.resume {
 .risk h2.sub {
   margin-top: 18px;
 }
+.risk .day {
+  color: var(--muted);
+  font-size: 13px;
+  margin: -4px 0 10px;
+}
 .risk .usage {
   display: flex;
   align-items: center;

@@ -229,14 +229,16 @@ def create_app(
         snap = json.loads(raw) if raw else {"time": "", "traders": {}, "desk": None, "unattributed_fills": 0}
         blocks = decode_blocks(await app.state.redis.hgetall(BLOCKS_KEY))
         for trader in blocks:  # a blocked trader with no positions still gets a row
-            snap["traders"].setdefault(trader, {"positions": {}, "realized": 0.0, "unrealized": 0.0, "total": 0.0})
+            zero = {"realized": 0.0, "unrealized": 0.0, "total": 0.0}
+            snap["traders"].setdefault(trader, {"positions": {}, **zero, "today": zero})
         for trader, entry in snap["traders"].items():
             entry["blocked"] = block_dict(blocks[trader]) if trader in blocks else None
         if user.can("risk.view.all"):
             return snap
         own = snap["traders"].get(user.id)
         desk = snap.get("desk") if user.can("risk.view.desk_aggregate") else None
-        return {"time": snap["time"], "traders": {user.id: own} if own else {}, "desk": desk}
+        traders = {user.id: own} if own else {}
+        return {"time": snap["time"], "trading_day": snap.get("trading_day"), "traders": traders, "desk": desk}
 
     def block_dict(block: TraderBlock) -> dict[str, str]:
         return {"reason": block.reason, "by": block.by, "time": block.time}

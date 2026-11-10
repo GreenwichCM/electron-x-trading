@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 from trading_db import ConfigError, follow_rules
 
 from .engine import RiskEngine
-from .redis_io import follow_books, follow_streams, publish, refresh_instruments
+from .redis_io import follow_books, follow_streams, load_sod, publish, refresh_instruments
 from .settings import Settings
 
 log = logging.getLogger("risk")
@@ -25,7 +25,9 @@ async def main() -> None:
         sys.exit(f"config error: {exc}")
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     redis = Redis.from_url(settings.redis_url)
-    engine = RiskEngine(max_spread=settings.max_spread)
+    engine = RiskEngine(max_spread=settings.max_spread, trading_day=settings.trading_day)
+    log.info("trading day %s, from %s", engine.today, settings.trading_day.starts_at(engine.today))
+    await load_sod(redis, engine)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

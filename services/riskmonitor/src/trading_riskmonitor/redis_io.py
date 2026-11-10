@@ -6,6 +6,8 @@ Reads:
 Writes, every second:
   * SET risk:snapshot and PUBLISH risk.update   the full snapshot (the api filters it per user)
   * HSET risk:blocked <trader>                  when a trader breaches the loss limit (see trading_core)
+  * SET risk:sod                                today's start-of-day marks, when they change
+Reads risk:sod back once at startup, so a restart during the day keeps the same start-of-day marks.
 """
 
 from __future__ import annotations
@@ -26,11 +28,29 @@ log = logging.getLogger("risk.redis")
 
 SNAPSHOT_KEY = "risk:snapshot"
 UPDATE_CHANNEL = "risk.update"
+SOD_KEY = "risk:sod"
 RETRY_S = 1.0
 
 
 def _data(fields: dict) -> dict[str, Any]:
     return json.loads(fields[b"data"] if b"data" in fields else fields["data"])
+
+
+def _entry_time(entry_id: bytes | str) -> float:
+    """A stream entry id is <milliseconds since the epoch>-<sequence>."""
+    text = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+    return int(text.split("-")[0]) / 1000
+
+
+async def load_sod(redis: Redis, engine: RiskEngine) -> None:
+    """Today's start-of-day marks from before a restart, if any."""
+    try:
+        raw = await redis.get(SOD_KEY)
+    except (RedisError, OSError) as exc:
+        log.warning("could not read start-of-day marks (%s); positions held overnight get late ones", exc)
+        return
+    if raw and engine.restore_sod(json.loads(raw)):
+        log.info("start-of-day marks for %s restored (%d contracts)", engine.today, len(engine.sod_marks))
 
 
 async def follow_streams(redis: Redis, engine: RiskEngine) -> None:
@@ -45,7 +65,7 @@ async def follow_streams(redis: Redis, engine: RiskEngine) -> None:
                     if name == "orders":
                         engine.on_order(_data(fields))
                     else:
-                        engine.on_fill(_data(fields))
+                        engine.on_fill(_data(fields), received=_entry_time(entry_id))
         except (RedisError, OSError) as exc:
             log.warning("reading orders/fills failed (%s); retrying", exc)
             await asyncio.sleep(RETRY_S)
@@ -85,11 +105,17 @@ async def refresh_instruments(redis: Redis, engine: RiskEngine, every_s: float =
 
 
 async def publish(redis: Redis, engine: RiskEngine, every_s: float = 1.0) -> None:
-    """Write the snapshot, and block any trader who has breached the loss limit."""
+    """Write the snapshot and the start-of-day marks, and block any trader who has breached the loss
+    limit."""
+    saved = -1
     while True:
         await asyncio.sleep(every_s)
         snapshot = engine.snapshot()
         try:
+            if engine.sod_version != saved:
+                version = engine.sod_version
+                await redis.set(SOD_KEY, json.dumps(engine.sod_state()))
+                saved = version
             data = json.dumps(snapshot)
             await redis.set(SNAPSHOT_KEY, data)
             await redis.publish(UPDATE_CHANNEL, data)
