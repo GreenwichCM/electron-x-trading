@@ -114,3 +114,24 @@ def test_each_browser_gets_its_own_feed():
             assert a.receive_json()["data"]["bid"] == 41.0
             assert b.receive_json()["data"]["bid"] == 41.0
         assert app.state.hub.clients == set()  # both cleaned up after closing
+
+
+def test_a_browser_that_watches_gets_only_the_books_it_shows():
+    redis, app = make_app()
+    other = "BFUT500-ERCOT-HB_NORTH-261231-16"
+    with TestClient(app) as client:
+        token, _ = login(client)
+        client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book(40.0, 40.5)))
+        client.portal.call(redis.set, f"md:last:{other}", json.dumps(book(41.0, 41.5, other)))
+        client.portal.call(app.state.hub.ready.wait)
+        with client.websocket_connect("/ws/md?watch=1") as ws:
+            ws.send_json({"type": "auth", "token": token})
+            assert ws.receive_json()["type"] == "welcome"
+            ws.send_json({"type": "watch", "symbols": [other]})
+            assert ws.receive_json() == {"type": "book", "data": book(41.0, 41.5, other)}  # its latest book
+            client.portal.call(redis.publish, f"md.{SYMBOL}", json.dumps(book(40.25, 40.5)))  # not shown: skipped
+            client.portal.call(redis.publish, f"md.{other}", json.dumps(book(41.25, 41.5, other)))
+            assert ws.receive_json()["data"] == book(41.25, 41.5, other)
+
+            ws.send_json({"type": "watch", "symbols": [SYMBOL]})  # the screen changed
+            assert ws.receive_json()["data"] == book(40.0, 40.5)

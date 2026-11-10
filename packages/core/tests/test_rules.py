@@ -47,3 +47,19 @@ def test_everyone_and_exchange_trader_ids():
     rules = TradingRules.everyone(["alice"], max_order_qty=10)
     assert rules.check_trader("alice", PJM) is None and rules.limits_for("alice", PJM).max_order_qty == 10
     assert RULES.exchange_trader("dave") == "dave@example.com" and RULES.exchange_trader("alice") is None
+
+
+def test_trader_for_an_electronx_id():
+    rules = TradingRules(
+        traders={
+            "alice": Trader("alice", "firms/h/users/alice"),
+            "dave": Trader("dave", "shared"),
+            "erin": Trader("erin", "shared"),
+            "bob": Trader("bob"),
+        },
+        entitlements=frozenset(),
+        limits={},
+    )
+    assert rules.trader_for("firms/h/users/alice") == "alice"
+    assert rules.trader_for("shared") is None  # two traders have it: it cannot say who traded
+    assert rules.trader_for("nobody") is None and rules.trader_for("") is None and rules.trader_for(None) is None

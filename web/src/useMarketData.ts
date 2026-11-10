@@ -20,17 +20,20 @@ export type Book = {
   bids: [number, number][];
   asks: [number, number][];
   last_trade: Trade | null;
+  state?: string; // OPEN, EXPIRED, ...
   time: string;
 };
 
-/** Live books for every symbol, from the api's /ws/md WebSocket. */
+/** Live books for the symbols in `watch`, from the api's /ws/md WebSocket. The server sends only
+ *  those, so the screen can show a few contracts out of thousands. */
 export function useMarketData(
   token: string,
   onUnauthorized: () => void,
+  watch: string[],
 ): { books: Record<string, Book>; status: Status } {
   const [books, setBooks] = useState<Record<string, Book>>({});
   const status = useLiveSocket(
-    "/ws/md",
+    "/ws/md?watch=1",
     token,
     (msg) => {
       if (msg.type === "book") {
@@ -41,6 +44,7 @@ export function useMarketData(
     onUnauthorized,
     // Prices we hold are no longer live: show them as stale until the server resends them.
     () => setBooks((prev) => Object.fromEntries(Object.entries(prev).map(([s, b]) => [s, { ...b, stale: true }]))),
+    { type: "watch", symbols: watch },
   );
   return { books, status };
 }

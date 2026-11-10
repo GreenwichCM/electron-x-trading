@@ -28,6 +28,7 @@ from .settings import ConfigError, Settings
 log = logging.getLogger("api")
 
 WS_AUTH_TIMEOUT_S = 5.0
+MAX_WATCH = 2000  # symbols one browser may follow at a time
 WS_UNAUTHORIZED = 4401  # application close codes live in 4000-4999
 WS_FORBIDDEN = 4403
 
@@ -204,6 +205,9 @@ def create_app(
     async def positions(user: Annotated[User, Depends(require("risk.view.all"))]) -> dict[str, Any]:
         """The exchange's positions for the whole account (drop copy) next to orderentry's, per trader.
 
+        `screen` is the part of the exchange's position traded on the ElectronX screen (orders orderentry
+        never sent), by contract and by ElectronX user; exchange minus screen should equal orderentry.
+        `pending` is a fill dropcopy cannot place yet (for a second or two): neither a match nor a break.
         A contract with a final settlement price is closed, so it is left out (listed under `settled`) as
         long as both sides agree on it; a break stays visible.
         """
@@ -214,23 +218,29 @@ def create_app(
         except OrderEntryUnavailable, OrderEntryError:
             by_trader = None
         exchange = dict(dc["positions"])
+        screen = dict(dc.get("screen") or {})
+        pending = dict(dc.get("pending") or {})
+        screen_by_user = {user: dict(held) for user, held in (dc.get("screen_by_user") or {}).items()}
         ours: dict[str, int] = {}
         for held in (by_trader or {}).values():
             for symbol, qty in held.items():
                 ours[symbol] = ours.get(symbol, 0) + qty
-        symbols = sorted(exchange.keys() | ours.keys())
+        symbols = sorted(exchange.keys() | ours.keys() | screen.keys())
         books = await app.state.redis.mget([f"md:last:{s}" for s in symbols]) if symbols else []
         settled = {}
         for symbol, book in zip(symbols, books, strict=True):
             settlement = (json.loads(book) if book else {}).get("settlement") or {}
-            agree = by_trader is not None and exchange.get(symbol, 0) == ours.get(symbol, 0)
+            known = exchange.get(symbol, 0) - screen.get(symbol, 0) - pending.get(symbol, 0)
+            agree = by_trader is not None and not pending.get(symbol) and known == ours.get(symbol, 0)
             if settlement.get("final") and agree:
                 settled[symbol] = settlement["price"]
-                exchange.pop(symbol, None)
-                for held in by_trader.values():
+                for held in (exchange, screen, pending, *screen_by_user.values(), *by_trader.values()):
                     held.pop(symbol, None)
         return {
             "exchange": exchange,
+            "screen": screen,
+            "screen_by_user": {user: held for user, held in screen_by_user.items() if held},
+            "pending": pending,
             "settled": settled,
             "dropcopy_connected": dc["connected"],
             "exchange_time": dc["time"],
@@ -310,8 +320,10 @@ def create_app(
             await ws.close(code=WS_UNAUTHORIZED)
         return user
 
-    async def pump(ws: WebSocket, feed: ClientFeed, msg_type: str) -> None:
-        """Send the feed to the browser until it disconnects."""
+    async def pump(
+        ws: WebSocket, feed: ClientFeed, msg_type: str, on_message: Callable[[dict], Any] | None = None
+    ) -> None:
+        """Send the feed to the browser until it disconnects; hand what it sends to `on_message`."""
 
         async def send() -> None:
             while True:
@@ -320,7 +332,13 @@ def create_app(
 
         async def receive() -> None:
             while True:
-                await ws.receive_text()  # nothing to handle yet; this notices the browser leaving
+                text = await ws.receive_text()  # also notices the browser leaving
+                try:
+                    msg = json.loads(text)
+                except ValueError:
+                    continue
+                if on_message is not None and isinstance(msg, dict):
+                    await on_message(msg)
 
         tasks = {asyncio.create_task(send()), asyncio.create_task(receive())}
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -332,7 +350,12 @@ def create_app(
 
     @app.websocket("/ws/md")
     async def market_data(ws: WebSocket) -> None:
-        """Every symbol's latest book on connect, then each change as it happens."""
+        """Every symbol's latest book on connect, then each change as it happens.
+
+        With ?watch=1 it sends nothing until the browser says what it shows, {"type": "watch",
+        "symbols": [...]}, and then only those: their latest books, then their changes. The browser
+        sends a new list whenever its view changes.
+        """
         user = await authenticate_ws(ws)
         if user is None:
             return
@@ -341,11 +364,21 @@ def create_app(
             return
         await ws.send_json({"type": "welcome", "user": user.to_dict()})
         hub: MarketDataHub = app.state.hub
-        feed = hub.connect()  # register first, so nothing published from here on is missed
-        try:
-            for symbol, payload in (await hub.latest()).items():
+        selective = ws.query_params.get("watch") == "1"
+        feed = hub.connect(set() if selective else None)  # register first: nothing published from now is missed
+
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "watch" or not isinstance(msg.get("symbols"), list):
+                return
+            new = feed.watch({str(s) for s in msg["symbols"][:MAX_WATCH]})
+            for symbol, payload in (await hub.latest_for(new)).items():
                 feed.put(symbol, payload, replace=False)  # never overwrite a newer live update
-            await pump(ws, feed, "book")
+
+        try:
+            if not selective:
+                for symbol, payload in (await hub.latest()).items():
+                    feed.put(symbol, payload, replace=False)
+            await pump(ws, feed, "book", on_message)
         finally:
             hub.disconnect(feed)
 

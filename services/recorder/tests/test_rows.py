@@ -22,3 +22,31 @@ def test_fill_and_alert_rows():
     blocked = alert_row("4-0", {"type": "trader_blocked", "trader": "alice", "by": "riskmonitor"}, "{}")
     assert (on["type"], on["trader"]) == ("killswitch_on", None)
     assert (blocked["type"], blocked["trader"], blocked["reason"]) == ("trader_blocked", "alice", "")
+
+
+def test_orders_from_the_electronx_screen_and_fills_carry_the_electronx_user():
+    screen = {
+        "cl_ord_id": "UI-1",
+        "order_id": "O9",
+        "trader": "",
+        "exchange_user": "firms/h/users/dave",
+        "source": "electronx",
+        "symbol": "BFUT500-ERCOT-HB_NORTH-261231-15",
+        "side": "BUY",
+        "qty": 2,
+        "price": 46.0,
+        "tif": "IOC",
+        "status": "filled",
+        "cum_qty": 2,
+        "avg_px": 45.5,
+        "created": "20261110-14:03:56.123456789",  # FIX time, to the nanosecond
+        "updated": "20261110-14:03:56.123456789",
+        "version": 3,
+    }
+    row = order_row("1-0", screen)
+    assert (row["source"], row["exchange_user"], row["trader"]) == ("electronx", "firms/h/users/dave", "")
+    assert row["created_at"] == datetime(2026, 11, 10, 14, 3, 56, 123456)
+    ours = order_row("2-0", {**screen, "source": None, "exchange_user": None, "trader": "alice"})
+    assert (ours["source"], ours["exchange_user"]) == ("app", None)
+    fill = {"exec_id": "E1", "symbol": "X", "side": "BUY", "qty": 1, "price": 1.0, "user": "u", "manual": True}
+    assert (fill_row("3-0", fill)["exchange_user"], fill_row("3-0", fill)["manual"]) == ("u", True)

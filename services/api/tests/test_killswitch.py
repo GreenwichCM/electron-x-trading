@@ -83,3 +83,35 @@ def test_settled_contracts_leave_the_positions_check_unless_they_break():
         client.portal.call(redis.set, "dc:positions", json.dumps(state))
         body = client.get("/api/positions", headers=headers(client, "bob")).json()
         assert body["exchange"] == {SYMBOL: 3} and body["settled"] == {}
+
+
+def test_trading_on_the_electronx_screen_is_shown_apart_and_is_not_a_break():
+    redis, app = make_app()
+    with TestClient(app) as client:
+        state = {
+            "positions": {SYMBOL: 5},
+            "screen": {SYMBOL: 3},
+            "screen_by_user": {"firms/h/users/dave": {SYMBOL: 3}},
+            "connected": True,
+            "time": "t",
+        }
+        client.portal.call(redis.set, "dc:positions", json.dumps(state))
+        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        assert body["exchange"] == {SYMBOL: 5} and body["screen"] == {SYMBOL: 3}
+        assert body["by_trader"] == {"alice": {SYMBOL: 2}} and body["screen_by_user"] == state["screen_by_user"]
+
+        book = {"symbol": SYMBOL, "settlement": {"price": 44.0, "final": True}}
+        client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book))
+        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        assert body["settled"] == {SYMBOL: 44.0} and body["exchange"] == body["screen"] == body["screen_by_user"] == {}
+
+
+def test_a_fill_not_placed_yet_is_neither_a_match_nor_a_break():
+    redis, app = make_app()
+    with TestClient(app) as client:
+        state = {"positions": {SYMBOL: 3}, "pending": {SYMBOL: 1}, "connected": True, "time": "t"}
+        client.portal.call(redis.set, "dc:positions", json.dumps(state))
+        book = {"symbol": SYMBOL, "settlement": {"price": 44.0, "final": True}}
+        client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book))
+        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        assert body["pending"] == {SYMBOL: 1} and body["settled"] == {}  # not left out while being checked

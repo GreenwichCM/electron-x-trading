@@ -8,12 +8,15 @@ from typing import Any
 
 
 def parse_time(value: str | None) -> datetime | None:
-    """ISO 8601 (our services) or FIX UTCTimestamp (20261106-02:56:02.069), as naive UTC for datetime2."""
+    """ISO 8601 (our services) or FIX UTCTimestamp (20261106-02:56:02.069, up to nanoseconds), as naive
+    UTC for datetime2."""
     if not value:
         return None
+    whole, dot, fraction = value.partition(".")
+    fix_value = f"{whole}.{fraction[:6]}" if dot else whole  # Python reads at most microseconds
     for fmt in ("%Y%m%d-%H:%M:%S.%f", "%Y%m%d-%H:%M:%S"):
         try:
-            return datetime.strptime(value, fmt)
+            return datetime.strptime(fix_value, fmt)
         except ValueError:
             pass
     try:
@@ -24,6 +27,8 @@ def parse_time(value: str | None) -> datetime | None:
 
 
 def order_row(stream_id: str, o: dict[str, Any]) -> dict[str, Any]:
+    """An update to one of our orders (stream `orders`) or to one from the ElectronX screen
+    (`screen_orders`, from dropcopy: source "electronx", no trader, the trader's ElectronX id instead)."""
     return {
         "stream_id": stream_id,
         "cl_ord_id": o["cl_ord_id"],
@@ -41,6 +46,8 @@ def order_row(stream_id: str, o: dict[str, Any]) -> dict[str, Any]:
         "message": (o.get("text") or "")[:400],
         "created_at": parse_time(o.get("created")),
         "updated_at": parse_time(o.get("updated")),
+        "source": o.get("source") or "app",
+        "exchange_user": o.get("exchange_user") or None,
     }
 
 
@@ -56,6 +63,8 @@ def fill_row(stream_id: str, f: dict[str, Any]) -> dict[str, Any]:
         "qty": int(f["qty"]),
         "price": float(f["price"]),
         "exec_time": parse_time(f.get("time")),
+        "exchange_user": f.get("user") or None,  # TargetSubID(57); fills from before step 13e have none
+        "manual": f.get("manual"),
     }
 
 

@@ -17,6 +17,7 @@ type PositionRisk = Pnl & {
   sod_qty: number; // held when the trading day began
   sod_mark: number | null;
   sod_mark_late: boolean; // not taken at the roll (riskmonitor was down, or no mark yet)
+  screen_qty?: number; // lots of the position traded on the ElectronX screen
   today: Pnl;
 };
 
@@ -253,7 +254,14 @@ export default function Risk({ user }: { user: User }) {
                 <tr key={`${trader}-${symbol}`}>
                   {seesAll && <td>{trader}</td>}
                   <td className="symbol">{symbol}</td>
-                  <td className="num">{p.settled ? `${signed(p.qty)} → 0` : signed(p.qty)}</td>
+                  <td className="num">
+                    {p.settled ? `${signed(p.qty)} → 0` : signed(p.qty)}
+                    {p.screen_qty ? (
+                      <div className="reason" title="Traded on the ElectronX screen, not sent from here">
+                        {signed(p.screen_qty)} on ElectronX
+                      </div>
+                    ) : null}
+                  </td>
                   <td className="num">{p.qty ? p.avg_px.toFixed(2) : ""}</td>
                   <td className="num">{p.mark == null ? "–" : p.mark.toFixed(2)}</td>
                   <MarkFrom p={p} />

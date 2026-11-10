@@ -53,6 +53,7 @@ class OrderEntryApp:
         self.session: FixSession | None = None
         self.orders: dict[str, Order] = {}  # ClOrdID -> order
         self.positions: dict[tuple[str, str], int] = {}  # (trader, symbol) -> net lots, from our fills
+        self.screen_by_user: dict[str, dict[str, int]] = {}  # ElectronX user -> symbol -> lots from their screen
         self._cancel_ids: dict[str, str] = {}  # cancel request ClOrdID -> order ClOrdID
         self._before_cancel: dict[str, Status] = {}
         self.kill_switch = KillSwitchState()
@@ -175,6 +176,18 @@ class OrderEntryApp:
         """New trading rules (entitlements and limits) for orders from now on. Live orders are kept."""
         self.rules = rules
 
+    def set_screen_positions(self, by_user: Mapping[str, Mapping[str, int]]) -> None:
+        """What each ElectronX user holds from orders entered on the ElectronX screen (from dropcopy)."""
+        self.screen_by_user = {user: dict(held) for user, held in by_user.items()}
+
+    def screen_position(self, trader: str, symbol: str) -> int:
+        """The trader's position in `symbol` from the ElectronX screen. It counts against the same
+        position limit as orders sent from here."""
+        user = self._exchange_trader(trader)
+        if self.rules is None or self.rules.trader_for(user) != trader:
+            return 0  # this trader's ElectronX id is shared or unknown: it cannot say whose it is
+        return self.screen_by_user.get(user, {}).get(symbol, 0)
+
     def positions_by_trader(self) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {}
         for (trader, symbol), qty in self.positions.items():
@@ -291,7 +304,8 @@ class OrderEntryApp:
         if limits is None:
             return reason
         open_orders = [o for o in self.orders.values() if o.trader == order.trader and o.live and o is not order]
-        position = self.positions.get((order.trader, order.symbol), 0)
+        key = (order.trader, order.symbol)
+        position = self.positions.get(key, 0) + self.screen_position(*key)  # the screen's counts too
         reason = check_order(order, self.instruments.get(order.symbol), limits, open_orders, position)
         if reason is not None:
             return reason

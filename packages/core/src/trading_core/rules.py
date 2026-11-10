@@ -110,6 +110,14 @@ class TradingRules:
         t = self.traders.get(trader)
         return t.exchange_trader_id if t else None
 
+    def trader_for(self, exchange_trader_id: str | None) -> str | None:
+        """Our trader with this ElectronX trader id, the TargetSubID(57) on the exchange's reports.
+        None if nobody has it, or more than one trader does (then it cannot say who traded)."""
+        if not exchange_trader_id:
+            return None
+        found = [t.trader_id for t in self.traders.values() if t.exchange_trader_id == exchange_trader_id]
+        return found[0] if len(found) == 1 else None
+
     def summary(self) -> str:
         active = sum(1 for t in self.traders.values() if t.active)
         return f"{active} active traders, {len(self.entitlements)} entitlements, {len(self.limits)} limit rows"

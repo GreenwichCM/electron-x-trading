@@ -6,6 +6,7 @@ Messages follow the ElectronX layouts:
   * every resting order is its own entry, keyed by MDEntryID(278); trades are MDEntryType(269)=2
   * a contract with a last trade time expires then: its orders are cancelled and its state becomes
     EXPIRED; `settle_after_s` later its settlement price is sent as MDEntryType(269)=6
+  * a long SecurityList comes in fragments of LIST_FRAGMENT, the last one with LastFragment(893)=Y
 
 The book is shared with the simulated order entry gateway, so client orders show up in market data
 and trade against the synthetic liquidity.
@@ -43,6 +44,7 @@ class SimInstrument:
     high: float = 500.0
     state: str = "OPEN"
     last_trade_at: float | None = None  # time.time() when trading stops; None: never
+    expires_at: float | None = None  # its ExpirationDate, if later than the last trade (the end of its hour)
     settle_after_s: float = 30.0  # the settlement price follows this long after trading stops
     settlement: float | None = None
 
@@ -75,9 +77,11 @@ class SimMarketData:
     """Attach to a SimGateway to serve reference data and market data with synthetic liquidity."""
 
     BOOK_LEVELS = 5
+    LIST_FRAGMENT = 200  # instruments per SecurityList message
 
     def __init__(self, gateway: SimGateway, instruments: list[SimInstrument], seed: int | None = None):
         self.gateway = gateway
+        self.active_per_step: int | None = None  # with thousands of contracts only some move each step
         gateway.on_app_message = self._on_message
         self.instruments = {i.symbol: i for i in instruments}
         self.books: dict[str, dict[str, RestingOrder]] = {i.symbol: {} for i in instruments}
@@ -218,7 +222,10 @@ class SimMarketData:
     def settle(self, symbol: str) -> None:
         """Publish the settlement price: fair value, bounded by the contract's floor and ceiling."""
         inst = self.instruments[symbol]
-        inst.settlement = min(max(self.fair[symbol] * inst.tick, inst.low), inst.high)
+        price = self.fair[symbol] * inst.tick
+        if symbol.startswith("BOPT"):  # a binary option pays out 100 or nothing
+            price = 100.0 if price >= 50 else 0.0
+        inst.settlement = min(max(price, inst.low), inst.high)
         d, t = _now_parts()
         self._pending.setdefault(symbol, []).append(
             [
@@ -244,11 +251,13 @@ class SimMarketData:
                 self.settle(symbol)
 
     def step(self) -> None:
-        """One random change per open instrument, then send the batched updates."""
+        """One random change per open instrument (or per `active_per_step` of them), then send the
+        batched updates."""
         self._expiries()
-        for symbol in self.books:
-            if self.instruments[symbol].state != "OPEN":
-                continue
+        symbols = [s for s in self.books if self.instruments[s].state == "OPEN"]
+        if self.active_per_step is not None and len(symbols) > self.active_per_step:
+            symbols = self.rng.sample(symbols, self.active_per_step)
+        for symbol in symbols:
             r = self.rng.random()
             synthetic = [o for o in self.books[symbol].values() if o.owner is None]
             if r < 0.35:
@@ -305,7 +314,14 @@ class SimMarketData:
             insts = [i for s, i in self.instruments.items() if s == msg.get(55)]
         if msg.get(336):  # TradingSessionID filters on instrument state
             insts = [i for i in insts if i.state == msg[336]]
-        body: Fields = [(320, msg.get(320, "")), (560, "0" if insts else "2"), (893, "Y"), (146, str(len(insts)))]
+        fragments = [insts[i : i + self.LIST_FRAGMENT] for i in range(0, len(insts), self.LIST_FRAGMENT)] or [[]]
+        for n, fragment in enumerate(fragments, 1):
+            last = "Y" if n == len(fragments) else "N"
+            body: Fields = [(320, msg.get(320, "")), (560, "0" if insts else "2"), (893, last)]
+            session.send("y", body + self._list_entries(fragment))
+
+    def _list_entries(self, insts: list[SimInstrument]) -> Fields:
+        body: Fields = [(146, str(len(insts)))]
         for i in insts:
             body += [
                 (55, i.symbol),
@@ -314,9 +330,10 @@ class SimMarketData:
                 (167, "EVENT"),
             ]
             if i.last_trade_at is not None:
-                when = [(866, _fix_time(i.last_trade_at)[:8]), (1145, _fix_time(i.last_trade_at))]
-                body += [(864, "2"), (865, "7"), when[0], (868, "LastTradeDate"), when[1]]
-                body += [(865, "7"), when[0], (868, "ExpirationDate"), when[1]]
+                ends = i.expires_at or i.last_trade_at
+                body += [(864, "2"), (865, "7"), (866, _fix_time(i.last_trade_at)[:8]), (868, "LastTradeDate")]
+                body += [(1145, _fix_time(i.last_trade_at)), (865, "7"), (866, _fix_time(ends)[:8])]
+                body += [(868, "ExpirationDate"), (1145, _fix_time(ends))]
             body += [
                 (969, str(i.tick)),
                 (562, str(i.lot)),
@@ -324,7 +341,7 @@ class SimMarketData:
                 (1149, f"{i.high:.2f}"),
                 (15, "USD"),
             ]
-        session.send("y", body)
+        return body
 
     def _market_data_request(self, session: SimSession, msg: FixMessage) -> None:
         symbols = [e[55] for e in msg.groups(146, 55)] or [msg.get(55, "")]

@@ -42,6 +42,13 @@ Then open http://localhost:5173 and sign in as a test user: alice and dave (trad
 (risk), carol (management). Ctrl-C stops all services.
 To run only some: `uv run honcho start sim marketdata`.
 
+By default the simulator lists three contracts that never expire. `SIM_UNIVERSE=full uv run honcho start`
+lists what the exchange does instead: every hour of today and tomorrow for each ERCOT hub and PJM Western
+Hub, in BFUT100, BFUT500, BFUT5000 and BOPT (about 1,800 contracts), each stopping trading when its hour
+begins and settling after it ends, with new days listed as they come. The price screen has filters for
+market, hub, product and delivery day, and shows at most 200 contracts; the browser gets live prices only
+for the contracts on its screen.
+
 ## Restarts
 
 Any service can be stopped and started again on its own. orderentry saves its orders and positions
@@ -49,6 +56,30 @@ to `var/oe/orders.json` every second and replays the rest from the Redis `orders
 exchange resends whatever happened while it was down. Orders still live from before a weekly
 sequence reset (Sunday 06:15 UTC) are cancelled, because what happened to them cannot be confirmed.
 The simulator keeps resting orders across its own restarts, like the exchange.
+
+## Orders from the ElectronX screen
+
+Traders can also trade on the exchange's own screen. The drop copy reports those orders too, each with
+the trader's ElectronX id (TargetSubID 57), so they are not lost:
+
+* dropcopy counts an order as ours if orderentry sent it, and otherwise, after 2 seconds, as from the
+  ElectronX screen. Only our orders are compared with orderentry, so screen trading never trips the kill
+  switch. The Positions panel shows it in its own column; a fill not placed yet shows as "checking".
+* riskmonitor gives screen fills to the trader whose `exchange_trader_id` in `electronx.traders` is that
+  ElectronX id: they count in that trader's P&L and daily loss limit. orderentry counts them against the
+  trader's position limit too. Give each trader who uses the screen their own `exchange_trader_id`; fills
+  whose id no trader has (or more than one has) stay unattributed.
+* The recorder keeps screen orders in `electronx.orders` and `electronx.order_events` with
+  `source = 'electronx'` and the ElectronX id in `exchange_user`; every fill has `exchange_user` too. Our
+  own orders have `source = 'app'`.
+
+To try it, give dave an ElectronX id, then have the simulator place screen orders for it:
+
+    UPDATE electronx.traders SET exchange_trader_id = 'firms/huron/users/dave' WHERE trader_id = N'dave';
+
+    SIM_SCREEN_USERS=firms/huron/users/dave uv run honcho start
+
+`SIM_SCREEN_EVERY_S` (60) sets how often. The order blotter shows only orders sent from this app.
 
 ## History in SQL Server
 
@@ -144,7 +175,7 @@ Positions, sequence numbers and order history live in `var/` and in Redis. To wi
 (development only), stop everything, then:
 
     rm -rf var
-    docker compose exec redis redis-cli del orders fills alerts killswitch dc:positions risk:snapshot risk:blocked risk:sod
+    docker compose exec redis redis-cli del orders fills alerts screen_orders killswitch dc:positions risk:snapshot risk:blocked risk:sod
 
 This keeps the history in SQL Server. To wipe that too: `docker compose down -v`, `docker compose up -d`,
 then run `migrate` again.

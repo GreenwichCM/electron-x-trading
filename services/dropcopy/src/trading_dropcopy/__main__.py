@@ -20,12 +20,25 @@ from .settings import ConfigError, Settings
 log = logging.getLogger("dc")
 
 
-async def watch_for_breaks(redis: Redis, app: DropCopyApp, reconciler: Reconciler, every_s: float = 1.0) -> None:
+async def watch(
+    redis: Redis, app: DropCopyApp, reconciler: Reconciler, sink: RedisFillSink, every_s: float = 1.0
+) -> None:
+    """Every second: tell the orders entered on the ElectronX screen from ours and publish them, then
+    check our own orders against orderentry (a lasting difference trips the kill switch)."""
     while True:
         await asyncio.sleep(every_s)
+        split = reconciler.split(app.orders.values())
+        for order in split.screen_orders:
+            if order.version > order.published:
+                if order.published == 0:
+                    log.info("order %s from the ElectronX screen, by %s: %s", order.order_id, order.user, order.symbol)
+                order.published = order.version
+                sink.screen_order(order.to_dict())
+        if sink.changed(split):
+            sink.positions(app.positions, app.connected)
         if not app.connected:
             continue  # positions may be behind while disconnected; the resend catches them up first
-        reason = reconciler.check(app.positions)
+        reason = reconciler.check(split.ours)
         if reason is not None:
             try:
                 await trip_kill_switch(redis, reason)
@@ -45,9 +58,10 @@ async def main() -> None:
         sys.exit(f"dropcopy is already running: {exc}")
 
     redis = Redis.from_url(settings.redis_url)
+    reconciler = Reconciler(grace_s=settings.break_grace_s)
     sink = RedisFillSink(redis)
     app = DropCopyApp(sink, FillJournal(settings.state_dir / "fills.jsonl"))
-    reconciler = Reconciler(grace_s=settings.break_grace_s)
+    sink.classify = lambda: reconciler.split(app.orders.values())
     ssl_context = build_ssl_context(settings.tls) if settings.tls else None
     server_name = settings.tls.server_name if settings.tls else None
     session = FixSession(settings.session, app, SeqStore(settings.state_dir / "seq.json"), ssl_context, server_name)
@@ -62,7 +76,7 @@ async def main() -> None:
     session_task = asyncio.create_task(session.run(), name="dc-session")
     helpers = [
         asyncio.create_task(follow_orders(redis, reconciler), name="orders"),
-        asyncio.create_task(watch_for_breaks(redis, app, reconciler), name="breaks"),
+        asyncio.create_task(watch(redis, app, reconciler, sink), name="watch"),
     ]
     stop_task = asyncio.create_task(stop.wait(), name="stop")
     done, _ = await asyncio.wait({sink_task, session_task, stop_task, *helpers}, return_when=asyncio.FIRST_COMPLETED)

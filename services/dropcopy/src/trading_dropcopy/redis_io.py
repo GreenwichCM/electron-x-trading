@@ -1,8 +1,13 @@
 """Redis side of dropcopy: publish fills and positions, read orderentry's orders, trip the kill switch.
 
 Redis layout:
-  * XADD fills            every fill from the drop copy (a stream: riskmonitor will read it)
-  * SET  dc:positions     {"positions": {symbol: lots}, "connected": bool, "time": ...}
+  * XADD fills            every fill from the drop copy, with the trader's ElectronX id (`user`)
+  * XADD screen_orders    every update to an order entered on the ElectronX screen (the recorder keeps them)
+  * SET  dc:positions     {"positions": {symbol: lots}, "screen": {symbol: lots},
+                           "screen_by_user": {ElectronX user: {symbol: lots}}, "pending": {symbol: lots},
+                           "connected": bool, "time": ...}
+                          `positions` is the whole account; `screen` the part traded on the ElectronX screen;
+                          `pending` fills of orders not known yet (a moment later they are ours or the screen's)
   * SET  killswitch       set by trip_kill_switch on a break (see trading_core.killswitch)
   * XADD alerts           a record of each automatic trip
 """
@@ -12,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,11 +25,12 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from trading_core import ALERTS_STREAM, KILLSWITCH_KEY, KillSwitchState
 
-from .reconcile import Reconciler
+from .reconcile import Reconciler, Split
 
 log = logging.getLogger("dc.redis")
 
 FILLS_STREAM = "fills"
+SCREEN_ORDERS_STREAM = "screen_orders"
 POSITIONS_KEY = "dc:positions"
 ORDERS_STREAM = "orders"
 STREAM_MAXLEN = 100_000
@@ -38,15 +45,28 @@ class RedisFillSink:
 
     RETRY_S = 1.0
 
-    def __init__(self, redis: Redis):
+    def __init__(self, redis: Redis, classify: Callable[[], Split] | None = None):
         self.redis = redis
+        self.classify = classify  # splits the account's position into ours, the screen's and pending
+        self.split: dict[str, dict] = Split().published()
         self._queue: asyncio.Queue[tuple[str, Any] | None] = asyncio.Queue()
 
     def fill(self, fill: dict[str, Any]) -> None:
         self._queue.put_nowait(("fill", fill))
 
+    def screen_order(self, order: dict[str, Any]) -> None:
+        self._queue.put_nowait(("screen_order", order))
+
+    def changed(self, split: Split) -> bool:
+        """True if the split differs from the one last published."""
+        return split.published() != self.split
+
     def positions(self, positions: dict[str, int], connected: bool) -> None:
-        self._queue.put_nowait(("positions", {"positions": dict(positions), "connected": connected, "time": now_iso()}))
+        """Publish the positions, split as of now, so the parts always add up to the whole."""
+        if self.classify is not None:
+            self.split = self.classify().published()
+        data = {"positions": dict(positions), **self.split, "connected": connected, "time": now_iso()}
+        self._queue.put_nowait(("positions", data))
 
     async def run(self) -> None:
         while True:
@@ -58,6 +78,8 @@ class RedisFillSink:
                 try:
                     if kind == "fill":
                         await self.redis.xadd(FILLS_STREAM, {"data": json.dumps(data)}, maxlen=STREAM_MAXLEN)
+                    elif kind == "screen_order":
+                        await self.redis.xadd(SCREEN_ORDERS_STREAM, {"data": json.dumps(data)}, maxlen=STREAM_MAXLEN)
                     else:
                         await self.redis.set(POSITIONS_KEY, json.dumps(data))
                     break

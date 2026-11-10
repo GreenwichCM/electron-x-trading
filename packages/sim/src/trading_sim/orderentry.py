@@ -7,7 +7,9 @@ Follows the ElectronX rules the OMS depends on:
   * price-time matching against everything resting in the shared book
   * rejects come back as ExecutionReport 150=8, unknown cancels as OrderCancelReject [9]
   * every ExecutionReport is also copied to the drop copy sessions, which share this port and may
-    not send orders themselves
+    not send orders themselves; it names the trader in TargetSubID(57)
+  * screen_order() places an order as a trader would on the ElectronX screen: no FIX session owns it,
+    so only the drop copy sessions hear about it
   * resting orders survive a restart of the simulator (with a `state_path`), as they would at the
     exchange, until the weekly reset
 """
@@ -48,6 +50,7 @@ class ClientOrder:
     cum_qty: int = 0
     notional_ticks: int = 0
     status: str = NEW
+    manual: bool = False  # ManualOrderIndicator(1028): entered by a person
 
     @property
     def leaves(self) -> int:
@@ -113,16 +116,43 @@ class SimOrderEntry:
             qty=qty,
             ticks=ticks,
             tif=tif,
+            manual=msg.get(1028) == "Y",
         )
+        self._enter(session, order, price, msg.get(40, ""))
 
+    def screen_order(self, user: str, symbol: str, side: str, qty: int, price: float, tif: str = "0") -> ClientOrder:
+        """An order a trader enters on the ElectronX screen. `side` is BUY ("1") or SELL ("2")."""
+        inst = self.md.instruments.get(symbol)
+        order = ClientOrder(
+            order_id=self.md.new_id("O"),
+            cl_ord_id=self.md.new_id("UI"),
+            sender="",
+            trader=user,
+            account="",
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            ticks=round(price / inst.tick) if inst else 0,
+            tif=tif,
+            manual=True,
+        )
+        self._enter(None, order, price, "2")
+        self.md.flush()
+        self._save()
+        return order
+
+    def _enter(self, session: SimSession | None, order: ClientOrder, price: float, ord_type: str) -> None:
+        """Check a new order, then acknowledge it, match it and rest what is left."""
+        inst = self.md.instruments.get(order.symbol)
+        cl, symbol, side, qty, ticks, tif = order.cl_ord_id, order.symbol, order.side, order.qty, order.ticks, order.tif
         reason = ""
-        if (session.sender, cl) in self.by_cl_ord_id or not cl:
+        if (order.sender, cl) in self.by_cl_ord_id or not cl:
             reason = "Duplicate or missing ClOrdID"
         elif inst is None:
             reason = f"Unknown security {symbol}"
         elif inst.state != "OPEN":
             reason = f"Book is {inst.state}"
-        elif msg.get(40) != "2":
+        elif ord_type != "2":
             reason = "Only limit orders (OrdType 2) are supported"
         elif side not in (BUY, SELL):
             reason = "Invalid Side"
@@ -140,7 +170,7 @@ class SimOrderEntry:
             return
 
         self.orders[order.order_id] = order
-        self.by_cl_ord_id[(session.sender, cl)] = order
+        self.by_cl_ord_id[(order.sender, cl)] = order
         self._report(session, order, EXEC_NEW)
 
         if tif == "4" and self._available(order) < qty:  # FOK: all or nothing
@@ -153,7 +183,7 @@ class SimOrderEntry:
             self._report(session, order, EXEC_CANCELED)
         elif order.leaves:
             book_side = BID if side == BUY else OFFER
-            self.md.add_order(symbol, book_side, ticks, order.leaves, owner=session.sender, order_id=order.order_id)
+            self.md.add_order(symbol, book_side, ticks, order.leaves, owner=order.sender, order_id=order.order_id)
 
     def _cancel(self, session: SimSession, msg: FixMessage) -> None:
         cl, orig = msg.get(11, ""), msg.get(41, "")
@@ -213,24 +243,21 @@ class SimOrderEntry:
         if order is None or not order.leaves:
             return
         order.status = CANCELED
-        session = self.gateway.sessions.get(order.sender)
-        if session is not None:
-            self._report(session, order, EXEC_CANCELED, text="Instrument expired")
+        self._report(self.gateway.sessions.get(order.sender), order, EXEC_CANCELED, text="Instrument expired")
         self._save()
 
     def _fill(self, order: ClientOrder, qty: int, ticks: int) -> None:
         order.cum_qty += qty
         order.notional_ticks += qty * ticks
         order.status = FILLED if order.cum_qty == order.qty else PARTIAL
-        session = self.gateway.sessions.get(order.sender)
-        if session is not None:
-            self._report(session, order, EXEC_TRADE, last_qty=qty, last_ticks=ticks)
+        session = self.gateway.sessions.get(order.sender)  # None for an order from the screen
+        self._report(session, order, EXEC_TRADE, last_qty=qty, last_ticks=ticks)
 
     # ---- reports ---------------------------------------------------------------------------
 
     def _report(
         self,
-        session: SimSession,
+        session: SimSession | None,
         order: ClientOrder,
         exec_type: str,
         text: str = "",
@@ -244,6 +271,7 @@ class SimOrderEntry:
         tick = inst.tick if inst else 0.0
         avg = order.notional_ticks * tick / order.cum_qty if order.cum_qty else 0.0
         body: Fields = [
+            (57, order.trader),  # TargetSubID: a header field; the gateway writes it straight after 56
             (37, order.order_id if order.status != REJECTED else "NONE"),
             (11, cl_ord_id or order.cl_ord_id),
             (17, self.md.new_id("E")),
@@ -259,6 +287,7 @@ class SimOrderEntry:
             (151, str(order.leaves)),
             (6, f"{avg:.4f}"),
             (60, utc_timestamp()),
+            (1028, "Y" if order.manual else "N"),
         ]
         if orig_cl_ord_id:
             body.append((41, orig_cl_ord_id))
@@ -266,7 +295,8 @@ class SimOrderEntry:
             body += [(31, f"{last_ticks * tick:.2f}"), (32, str(last_qty))]
         if text:
             body.append((58, text))
-        session.send("8", body)
+        if session is not None:
+            session.send("8", body)
         for sender in self.drop_copy_senders:
             # Kept for resend even while the drop copy session is disconnected, like on the real gateway.
             self.gateway.session(sender).send("8", list(body))

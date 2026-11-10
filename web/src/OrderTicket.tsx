@@ -25,7 +25,8 @@ export default function OrderTicket({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!symbol && symbols.length) setSymbol(symbols[0]);
+    // The price screen's filters changed: never keep a contract the ticket no longer lists.
+    if (symbols.length && !symbols.includes(symbol)) setSymbol(symbols[0]);
   }, [symbols, symbol]);
 
   useEffect(() => {

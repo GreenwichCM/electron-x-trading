@@ -13,11 +13,17 @@ from trading_db import Connection
 
 ORDER_COLUMNS = (
     "cl_ord_id, version, trader, symbol, side, qty, price, tif, status, order_id, cum_qty, avg_px, "
-    "message, created_at, updated_at"
+    "message, created_at, updated_at, source, exchange_user"
+)
+# An order from the ElectronX screen has no trader: it belongs to whoever has its ElectronX id, if only one does.
+TRADER = (
+    "COALESCE(NULLIF(%(trader)s, N''), (SELECT CASE WHEN COUNT(*) = 1 THEN MIN(trader_id) END "
+    "FROM electronx.traders WHERE exchange_trader_id = %(exchange_user)s), N'')"
 )
 ORDER_VALUES = (
-    "%(cl_ord_id)s, %(version)s, %(trader)s, %(symbol)s, %(side)s, %(qty)s, %(price)s, %(tif)s, %(status)s, "
-    "%(order_id)s, %(cum_qty)s, %(avg_px)s, %(message)s, %(created_at)s, %(updated_at)s"
+    f"%(cl_ord_id)s, %(version)s, {TRADER}, %(symbol)s, %(side)s, %(qty)s, %(price)s, %(tif)s, %(status)s, "
+    "%(order_id)s, %(cum_qty)s, %(avg_px)s, %(message)s, %(created_at)s, %(updated_at)s, %(source)s, "
+    "%(exchange_user)s"
 )
 
 INSERT_ORDER_EVENT = f"""
@@ -37,9 +43,10 @@ IF @@ROWCOUNT = 0 AND NOT EXISTS (SELECT 1 FROM electronx.orders WHERE cl_ord_id
 
 INSERT_FILL = """
 IF NOT EXISTS (SELECT 1 FROM electronx.fills WHERE exec_id = %(exec_id)s)
-    INSERT electronx.fills (exec_id, stream_id, order_id, cl_ord_id, account, symbol, side, qty, price, exec_time)
+    INSERT electronx.fills (exec_id, stream_id, order_id, cl_ord_id, account, symbol, side, qty, price, exec_time,
+                            exchange_user, manual)
     VALUES (%(exec_id)s, %(stream_id)s, %(order_id)s, %(cl_ord_id)s, %(account)s, %(symbol)s, %(side)s,
-            %(qty)s, %(price)s, %(exec_time)s);
+            %(qty)s, %(price)s, %(exec_time)s, %(exchange_user)s, %(manual)s);
 """
 
 INSERT_ALERT = """

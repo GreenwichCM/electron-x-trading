@@ -20,16 +20,29 @@ class ClientFeed:
 
     A slow connection (a laptop on hotel wifi) then gets the latest prices when it catches up,
     instead of a growing queue of old ones that would slow the whole process down.
+
+    `watching` is the set of symbols the browser shows; None means all of them. With thousands of
+    contracts listed, a browser asks only for those on its screen.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, watching: set[str] | None = None) -> None:
         self.pending: dict[str, Payload] = {}
+        self.watching = watching
         self._wake = asyncio.Event()
 
     def put(self, symbol: str, payload: Payload, replace: bool = True) -> None:
+        if self.watching is not None and symbol not in self.watching:
+            return
         if replace or symbol not in self.pending:
             self.pending[symbol] = payload
         self._wake.set()
+
+    def watch(self, symbols: set[str]) -> set[str]:
+        """Show only `symbols` from now on. Returns the ones that are new, whose books it still needs."""
+        new = symbols - (self.watching or set())
+        self.watching = set(symbols)
+        self.pending = {s: p for s, p in self.pending.items() if s in symbols}
+        return new
 
     async def next_batch(self) -> dict[str, Payload]:
         await self._wake.wait()
@@ -46,8 +59,8 @@ class MarketDataHub:
         self.clients: set[ClientFeed] = set()
         self.ready = asyncio.Event()  # set once the Redis subscription is active
 
-    def connect(self) -> ClientFeed:
-        feed = ClientFeed()
+    def connect(self, watching: set[str] | None = None) -> ClientFeed:
+        feed = ClientFeed(watching)
         self.clients.add(feed)
         return feed
 
@@ -76,6 +89,12 @@ class MarketDataHub:
     async def latest(self) -> dict[str, Payload]:
         """The last book for every symbol, from the md:last:<symbol> keys."""
         return await self._read_prefix("md:last:")
+
+    async def latest_for(self, symbols: set[str]) -> dict[str, Payload]:
+        """The last book of each of `symbols` that has one."""
+        names = sorted(symbols)
+        values = await self.redis.mget([f"md:last:{s}" for s in names]) if names else []
+        return {s: json.loads(v) for s, v in zip(names, values, strict=True) if v is not None}
 
     async def instruments(self) -> dict[str, Payload]:
         return await self._read_prefix("instrument:")

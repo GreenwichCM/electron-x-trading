@@ -274,3 +274,23 @@ def test_control_endpoint_needs_the_internal_token():
     )
     assert ok.status_code == 200 and ok.json()["status"] == "rejected"  # no instrument X, no session
     assert len(client.get("/orders", headers={"X-Internal-Token": TOKEN}).json()) == 1
+
+
+def test_positions_from_the_electronx_screen_count_against_the_position_limit():
+    async def scenario():
+        async with Harness() as h:
+            h.oe.set_rules(
+                TradingRules(
+                    traders={"alice": Trader("alice", "firms/h/users/alice")},
+                    entitlements=frozenset({(ANY, ANY, ANY)}),
+                    limits={(ANY, ANY, ANY): Limits(10, 5000.0, 20, 5, 5000.0)},
+                )
+            )
+            h.oe.set_screen_positions({"firms/h/users/alice": {SYMBOL: 4}})
+            too_many = h.oe.submit("alice", SYMBOL, "BUY", 2, 40.0)
+            fits = h.oe.submit("alice", SYMBOL, "SELL", 2, 60.0)
+            await asyncio.sleep(0.1)
+            assert too_many.status == Status.REJECTED and "position could reach 6" in too_many.text
+            assert fits.status != Status.REJECTED
+
+    run(scenario())

@@ -178,3 +178,13 @@ def test_new_contracts_are_picked_up_and_old_ones_retired():
             assert set(h.app.subscribed) == {*SYMBOLS, new.symbol}
 
     run(scenario())
+
+
+def test_a_long_security_list_comes_in_fragments():
+    async def scenario():
+        many = [SimInstrument(f"BFUT500-ERCOT-HB_T{n}-261231-15") for n in range(450)]  # three fragments of 200
+        async with Harness(instruments=many) as h:
+            await wait_for(lambda: len(h.app.subscribed) == 450, timeout=10)
+            assert len(h.pub.instruments) == 450
+
+    run(scenario())

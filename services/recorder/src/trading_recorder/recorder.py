@@ -1,4 +1,7 @@
-"""Copy the Redis streams `orders`, `fills` and `alerts` into SQL Server, for good.
+"""Copy the Redis streams `orders`, `fills`, `alerts` and `screen_orders` into SQL Server, for good.
+
+`screen_orders` (from dropcopy) are orders entered on the ElectronX screen; they go into the same tables
+as ours, with source 'electronx'.
 
 Redis keeps only the latest 100,000 or so entries of each stream; SQL Server keeps everything. The
 recorder reads from where its last commit ended (dbo.stream_offsets), so stopping it, or SQL Server
@@ -22,7 +25,7 @@ from .rows import alert_row, decode_entry, fill_row, order_row
 
 log = logging.getLogger("recorder")
 
-STREAMS = ("orders", "fills", "alerts")
+STREAMS = ("orders", "fills", "alerts", "screen_orders")
 RETRY_S = 2.0
 
 
@@ -128,7 +131,7 @@ class Recorder:
         assert self.conn is not None
         try:
             data, raw = decode_entry(fields)
-            if stream == "orders":
+            if stream in ("orders", "screen_orders"):
                 row = order_row(entry_id, data)
             elif stream == "fills":
                 row = fill_row(entry_id, data)
@@ -137,7 +140,7 @@ class Recorder:
         except (KeyError, ValueError, TypeError) as exc:
             log.error("%s %s cannot be recorded (%r); skipping it: %s", stream, entry_id, exc, fields)
             return
-        if stream == "orders":
+        if stream in ("orders", "screen_orders"):
             store.write_order(self.conn, row)
         elif stream == "fills":
             store.write_fill(self.conn, row)

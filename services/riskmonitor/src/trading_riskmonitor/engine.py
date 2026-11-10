@@ -1,7 +1,10 @@
 """Risk per trader and for the desk, from the exchange's fills and live marks.
 
 Fills come from dropcopy (the exchange's record) and carry a ClOrdID but no trader; the trader is
-found from orderentry's `orders` stream. A fill whose order is not known yet waits until it is.
+found from orderentry's `orders` stream. A fill whose order is not known yet waits until it is. If it
+is still unknown after SCREEN_AFTER_S, the order was entered on the ElectronX screen: the fill goes to
+the trader whose ElectronX trader id (electronx.traders.exchange_trader_id) is the fill's `user`, the
+TargetSubID(57) on the drop copy. A fill whose user matches no trader stays unattributed.
 
 P&L is reported for today's trading day (see day.py) and since start (every fill riskmonitor has
 seen). Today's P&L values what was held when the day began at the start-of-day mark, so
@@ -41,6 +44,7 @@ log = logging.getLogger("risk")
 
 
 ENDED_STATES = {"EXPIRED", "TERMINATED"}  # TradingSessionID(336)
+SCREEN_AFTER_S = 5.0  # a fill whose order orderentry has not published by then came from the ElectronX screen
 
 
 def _iso_time(value: Any) -> float | None:
@@ -88,6 +92,7 @@ class Holding:
     since_start: Position = field(default_factory=Position)
     sod_qty: int = 0  # lots held when today's trading day began
     today: list[tuple[str, int, float]] = field(default_factory=list)  # today's fills: side, qty, price
+    screen: int = 0  # the part of the position traded on the ElectronX screen, in lots
 
     def today_position(self, sod_price: float | None) -> Position:
         """Today's position: what was held at the start, bought at the start-of-day mark, then today's
@@ -128,7 +133,7 @@ class RiskEngine:
         self.clock = clock
         self.trading_day = trading_day or TradingDay()
         self.today = self.trading_day.day_of(clock())
-        self.traders: dict[str, str] = {}  # ClOrdID -> trader
+        self.traders: dict[str, str] = {}  # ClOrdID, and the exchange's OrderID once known -> trader
         self.holdings: dict[tuple[str, str], Holding] = {}  # (trader, symbol) -> holding
         self.books: dict[str, dict[str, Any]] = {}
         self.instruments: dict[str, dict[str, Any]] = {}
@@ -145,6 +150,8 @@ class RiskEngine:
     def on_order(self, order: Mapping[str, Any]) -> None:
         cl = order["cl_ord_id"]
         self.traders[cl] = order["trader"]
+        if order.get("order_id"):  # a fill after a cancel request carries the cancel's ClOrdID instead
+            self.traders[order["order_id"]] = order["trader"]
         for fill in self._waiting.pop(cl, []):
             self._apply(order["trader"], fill)
 
@@ -154,8 +161,8 @@ class RiskEngine:
         if fill["exec_id"] in self._seen:
             return
         self._seen.add(fill["exec_id"])
-        fill = {**fill, "ts": fix_time(fill.get("time") or "") or received or self.clock()}
-        trader = self.traders.get(fill["cl_ord_id"])
+        fill = {**fill, "ts": fix_time(fill.get("time") or "") or received or self.clock(), "arrived": self.clock()}
+        trader = self.traders.get(fill["cl_ord_id"]) or self.traders.get(fill.get("order_id") or "")
         if trader is None:
             self._waiting.setdefault(fill["cl_ord_id"], []).append(fill)
         else:
@@ -177,10 +184,12 @@ class RiskEngine:
     def on_instrument(self, instrument: Mapping[str, Any]) -> None:
         self.instruments[instrument["symbol"]] = dict(instrument)
 
-    def _apply(self, trader: str, fill: Mapping[str, Any]) -> None:
+    def _apply(self, trader: str, fill: Mapping[str, Any], screen: bool = False) -> None:
         self._roll()
         side, qty, price = fill["side"], int(fill["qty"]), float(fill["price"])
         holding = self.holdings.setdefault((trader, fill["symbol"]), Holding())
+        if screen:
+            holding.screen += _signed(side, qty)
         holding.since_start.apply(side, qty, price)
         if self.trading_day.day_of(fill["ts"]) < self.today:
             holding.sod_qty += _signed(side, qty)  # an earlier day's fill: part of the start-of-day position
@@ -267,8 +276,25 @@ class RiskEngine:
 
     # ---- outputs ---------------------------------------------------------------------------
 
+    def _attribute_screen_fills(self) -> None:
+        """Fills of orders orderentry never published: give each to the trader its ElectronX user names."""
+        if self.rules is None:
+            return  # without the traders' ElectronX ids nobody can be found yet
+        now = self.clock()
+        for cl, fills in list(self._waiting.items()):
+            if now - fills[0]["arrived"] < SCREEN_AFTER_S:
+                continue
+            trader = self.rules.trader_for(fills[0].get("user"))
+            if trader is None:
+                continue
+            del self._waiting[cl]
+            for fill in fills:
+                self._apply(trader, fill, screen=True)
+            log.info("%d fill(s) of %s on the ElectronX screen belong to %s", len(fills), cl, trader)
+
     def snapshot(self) -> dict[str, Any]:
         self._roll()
+        self._attribute_screen_fills()
         now = self.clock()
         traders: dict[str, Any] = {}
         desk_positions: dict[str, int] = {}
@@ -303,6 +329,7 @@ class RiskEngine:
                 "sod_qty": h.sod_qty,
                 "sod_mark": sod.price if sod else None,
                 "sod_mark_late": bool(h.sod_qty) and (sod is None or sod.late),
+                "screen_qty": h.screen,
                 "today": _rounded(today),
                 **_rounded(since_start),
             }

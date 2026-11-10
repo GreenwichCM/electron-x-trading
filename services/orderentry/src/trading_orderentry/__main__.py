@@ -31,8 +31,9 @@ SAVE_EVERY_S = 1.0
 SAVE_AT_LEAST_EVERY_S = 60.0  # even with no changes, so the file shows when orderentry last ran
 
 
-async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 30.0) -> None:
-    """Tick sizes and limits come from marketdata, which keeps instrument:<symbol> current in Redis."""
+async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 5.0) -> None:
+    """Tick sizes and limits come from marketdata, which keeps instrument:<symbol> current in Redis.
+    Often, because new contracts are listed all the time and cannot be traded until they are here."""
     while True:
         try:
             keys = [k async for k in redis.scan_iter(match="instrument:*")]
@@ -42,6 +43,17 @@ async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 
                     oe.instruments[inst.symbol] = inst
         except (RedisError, OSError) as exc:
             log.warning("could not refresh instruments: %s", exc)
+        await asyncio.sleep(every_s)
+
+
+async def watch_screen_positions(redis: Redis, oe: OrderEntryApp, every_s: float = 1.0) -> None:
+    """Positions traded on the ElectronX screen, from dropcopy, so position limits count them too."""
+    while True:
+        try:
+            raw = await redis.get("dc:positions")
+            oe.set_screen_positions((json.loads(raw) if raw else {}).get("screen_by_user") or {})
+        except (RedisError, OSError) as exc:
+            log.warning("could not read the positions traded on the ElectronX screen: %s", exc)
         await asyncio.sleep(every_s)
 
 
@@ -140,6 +152,7 @@ async def main() -> None:
         asyncio.create_task(control.serve(), name="control"),
         asyncio.create_task(refresh_instruments(redis, oe), name="instruments"),
         asyncio.create_task(watch_kill_switch(redis, oe), name="killswitch"),
+        asyncio.create_task(watch_screen_positions(redis, oe), name="screen"),
         asyncio.create_task(save_regularly(state_path, oe, sink, rec), name="save"),
         asyncio.create_task(
             follow_rules(settings.db, oe.set_rules, settings.rules_refresh_s, appname="orderentry"), name="rules"
@@ -155,7 +168,7 @@ async def main() -> None:
     await session.stop()
     await sink.close()
     for task in tasks:
-        if task.get_name() in ("instruments", "killswitch", "save", "rules"):
+        if task.get_name() in ("instruments", "killswitch", "screen", "save", "rules"):
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     save(state_path, oe, sink, rec)  # after the sink has written everything, so nothing is replayed twice

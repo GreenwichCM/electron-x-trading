@@ -3,6 +3,7 @@ import json
 
 from fakeredis import FakeAsyncRedis
 from trading_core import BLOCKS_KEY, Limits, TradingRules, decode_blocks
+from trading_core.rules import Trader
 from trading_riskmonitor import SNAPSHOT_KEY, RiskEngine, follow_streams, publish
 
 X, Y = "BFUT500-ERCOT-HB_NORTH-261231-15", "BFUT100-PJM-WESTERN_HUB-261231-15"
@@ -111,3 +112,23 @@ def test_streams_snapshot_and_automatic_block_through_redis():
         assert len(await r.xrange("alerts")) == 1  # blocked once, not once per second
 
     asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
+def test_fills_from_the_electronx_screen_go_to_the_trader_with_that_electronx_id():
+    clock = Clock()
+    e = RiskEngine(clock=clock)
+    traders = {"alice": Trader("alice", "firms/h/users/alice"), "dave": Trader("dave")}
+    e.set_rules(TradingRules(traders=traders, entitlements=frozenset(), limits={}))
+    e.on_order(order("A1", "alice"))
+    e.on_fill(fill("E1", "A1", "BUY", 2, 40.0))  # sent from our app
+    e.on_fill({**fill("E2", "UI-1", "BUY", 3, 41.0), "user": "firms/h/users/alice"})  # from the screen
+    e.on_fill({**fill("E3", "UI-2", "SELL", 1, 41.0), "user": "firms/h/users/nobody"})
+    e.on_book(book(41.0, 41.5))
+    snap = e.snapshot()
+    assert snap["traders"]["alice"]["positions"][X]["qty"] == 2 and snap["unattributed_fills"] == 2
+
+    clock.now += 5  # orderentry never published those orders: they came from the screen
+    snap = e.snapshot()
+    p = snap["traders"]["alice"]["positions"][X]
+    assert (p["qty"], p["screen_qty"]) == (5, 3)
+    assert snap["unattributed_fills"] == 1  # nobody has that ElectronX id

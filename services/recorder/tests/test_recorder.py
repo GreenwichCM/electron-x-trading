@@ -169,3 +169,30 @@ def test_run_stops_when_asked(sql_server):
     stop.set()
     thread.join(5)
     assert not thread.is_alive() and recorder.recorded == 1
+
+
+def test_orders_from_the_electronx_screen_are_recorded_with_their_trader(sql_server):
+    migrate(sql_server)
+    with closing(connect(sql_server, autocommit=True)) as conn:
+        conn.cursor().execute(
+            "INSERT electronx.traders (trader_id, exchange_trader_id) VALUES (N'dave', 'firms/h/users/dave')"
+        )
+    r = FakeRedis()
+    screen = {
+        **order("UI-1", 1, "filled", cum_qty=3, trader=""),
+        "order_id": "O9",
+        "source": "electronx",
+        "exchange_user": "firms/h/users/dave",
+    }
+    add(r, "screen_orders", screen)
+    add(r, "screen_orders", {**screen, "cl_ord_id": "UI-2", "exchange_user": "firms/h/users/nobody"})
+    add(r, "fills", {**fill("E1", "UI-1", 3), "order_id": "O9", "user": "firms/h/users/dave", "manual": True})
+    add(r, "orders", order("A", 1))
+    assert drain(make_recorder(r, sql_server)) == 4
+    rows = "SELECT cl_ord_id, trader, source, exchange_user FROM electronx.orders ORDER BY cl_ord_id"
+    assert query(sql_server, rows) == [
+        ("A", "alice", "app", None),
+        ("UI-1", "dave", "electronx", "firms/h/users/dave"),
+        ("UI-2", "", "electronx", "firms/h/users/nobody"),  # no trader has that ElectronX id
+    ]
+    assert query(sql_server, "SELECT exchange_user, manual FROM electronx.fills") == [("firms/h/users/dave", True)]
