@@ -100,6 +100,23 @@ class SimMarketData:
         deduplicate fills by ExecID, so a restarted simulator must never reuse one."""
         return f"{prefix}{self._run}-{next(self._ids)}"
 
+    def list_instrument(self, inst: SimInstrument) -> None:
+        """A newly listed contract: in the next SecurityList, with a fresh book."""
+        self.instruments[inst.symbol] = inst
+        self.books[inst.symbol] = {}
+        self.fair[inst.symbol] = round(inst.fair / inst.tick)
+        for k in range(1, self.BOOK_LEVELS + 1):
+            self.add_order(inst.symbol, BID, self.fair[inst.symbol] - k, self.rng.randint(1, 10))
+            self.add_order(inst.symbol, OFFER, self.fair[inst.symbol] + k, self.rng.randint(1, 10))
+        self._pending.pop(inst.symbol, None)  # nobody is subscribed to it yet
+
+    def delist(self, symbol: str) -> None:
+        """The contract is gone: not listed, and asking for its market data is rejected."""
+        for table in (self.instruments, self.books, self.fair, self._pending):
+            table.pop(symbol, None)
+        for subs in self.subscriptions.values():
+            subs.pop(symbol, None)
+
     # ---- book queries ----------------------------------------------------------------------
 
     def best_ticks(self, symbol: str, side: str) -> int | None:

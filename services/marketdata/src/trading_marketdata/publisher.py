@@ -4,6 +4,7 @@ Redis layout:
   * PUBLISH md.<symbol>        every book update (JSON), for live subscribers
   * SET     md:last:<symbol>   the latest book update, so a service that starts later has a value at once
   * SET     instrument:<symbol> reference data (tick size, lot size, limits, last trade and expiration times)
+A retired contract's two keys expire after RETIRED_TTL_S, so riskmonitor keeps its settlement for a while.
 """
 
 from __future__ import annotations
@@ -19,11 +20,13 @@ from redis.exceptions import RedisError
 log = logging.getLogger("md.publisher")
 
 Payload = dict[str, Any]
+RETIRED_TTL_S = 30 * 24 * 3600
 
 
 class Publisher(Protocol):
     def book(self, symbol: str, payload: Payload) -> None: ...
     def instrument(self, symbol: str, payload: Payload) -> None: ...
+    def retire(self, symbol: str) -> None: ...
 
 
 class MemoryPublisher:
@@ -33,6 +36,7 @@ class MemoryPublisher:
         self.books: dict[str, Payload] = {}
         self.book_updates: list[Payload] = []
         self.instruments: dict[str, Payload] = {}
+        self.retired: list[str] = []
 
     def book(self, symbol: str, payload: Payload) -> None:
         self.books[symbol] = payload
@@ -40,6 +44,9 @@ class MemoryPublisher:
 
     def instrument(self, symbol: str, payload: Payload) -> None:
         self.instruments[symbol] = payload
+
+    def retire(self, symbol: str) -> None:
+        self.retired.append(symbol)
 
 
 class RedisPublisher:
@@ -55,6 +62,7 @@ class RedisPublisher:
         self.redis = redis
         self._books: dict[str, Payload] = {}
         self._instruments: dict[str, Payload] = {}
+        self._retired: set[str] = set()
         self._wake = asyncio.Event()
         self._closed = False
 
@@ -66,13 +74,17 @@ class RedisPublisher:
         self._instruments[symbol] = payload
         self._wake.set()
 
+    def retire(self, symbol: str) -> None:
+        self._retired.add(symbol)
+        self._wake.set()
+
     async def run(self) -> None:
         """Publish until close(); call as a task."""
         while True:
             await self._wake.wait()
             self._wake.clear()
             await self._flush()
-            if self._closed and not self._books and not self._instruments:
+            if self._closed and not self._books and not self._instruments and not self._retired:
                 return
 
     async def close(self) -> None:
@@ -83,7 +95,8 @@ class RedisPublisher:
     async def _flush(self) -> None:
         books, self._books = self._books, {}
         instruments, self._instruments = self._instruments, {}
-        if not books and not instruments:
+        retired, self._retired = self._retired, set()
+        if not books and not instruments and not retired:
             return
         try:
             async with self.redis.pipeline(transaction=False) as pipe:
@@ -93,6 +106,9 @@ class RedisPublisher:
                     data = json.dumps(payload)
                     pipe.set(f"md:last:{symbol}", data)
                     pipe.publish(f"md.{symbol}", data)
+                for symbol in retired:  # after any last update above
+                    pipe.expire(f"md:last:{symbol}", RETIRED_TTL_S)
+                    pipe.expire(f"instrument:{symbol}", RETIRED_TTL_S)
                 await pipe.execute()
         except (RedisError, OSError) as exc:
             if self._closed:
@@ -103,5 +119,6 @@ class RedisPublisher:
                 self._books.setdefault(symbol, payload)
             for symbol, payload in instruments.items():
                 self._instruments.setdefault(symbol, payload)
+            self._retired |= retired
             await asyncio.sleep(self.RETRY_S)
             self._wake.set()

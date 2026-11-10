@@ -2,13 +2,20 @@
 
 Besides the book and trades, it keeps each contract's state (TradingSessionID(336): OPEN, EXPIRED, ...)
 and its settlement price (MDEntryType(269)=6), and publishes both with the book.
+
+ElectronX lists new hourly contracts all the time, so the instrument list is requested again every few
+minutes (request_list) and only new contracts are subscribed. A contract that drops off the list stays
+subscribed until its settlement price has arrived (PJM settles the next day), `keep_unsettled_s` has
+passed, or the exchange rejects the subscription; then it is retired: unsubscribed, forgotten here, and
+its Redis keys left to expire.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
-from collections.abc import Collection
+import time
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +31,7 @@ TRADE, SETTLEMENT = "2", "6"  # MDEntryType(269)
 INDICATIVE = {"3", "5"}  # OpenCloseSettlFlag(286): expected entry, theoretical price; anything else is final
 AGGRESSOR = {"1": "BUY", "2": "SELL"}
 DEPTH_LEVELS = 10
+KEEP_UNSETTLED_S = 3 * 24 * 3600
 
 
 def _px(entry: dict[int, str]) -> float | None:
@@ -44,19 +52,32 @@ def _entry_time(entry: dict[int, str]) -> str:
 
 
 class MarketDataApp:
-    """Lists instruments on logon, subscribes to them, keeps their books and publishes every change.
+    """Lists instruments on logon and every few minutes, subscribes to new ones, keeps their books and
+    publishes every change.
 
     `symbols` limits the subscription; empty means every instrument the exchange lists.
     """
 
-    def __init__(self, publisher: Publisher, symbols: Collection[str] = ()):
+    def __init__(
+        self,
+        publisher: Publisher,
+        symbols: Collection[str] = (),
+        keep_unsettled_s: float = KEEP_UNSETTLED_S,
+        clock: Callable[[], float] = time.time,
+    ):
         self.publisher = publisher
         self.wanted = set(symbols)
+        self.keep_unsettled_s = keep_unsettled_s
+        self.clock = clock
         self.books: dict[str, OrderBook] = {}
         self.instruments: dict[str, Instrument] = {}
         self.last_trades: dict[str, dict[str, Any]] = {}
         self.settlements: dict[str, dict[str, Any]] = {}
+        self.subscribed: dict[str, str] = {}  # symbol -> MDReqID, on this connection
+        self.delisted: dict[str, float] = {}  # symbol -> when it left the exchange's list
+        self._requests: dict[str, str] = {}  # MDReqID -> symbol
         self._listing: list[Instrument] = []
+        self._list_req = ""
         self._ids = itertools.count(1)
 
     # ---- SessionApp ------------------------------------------------------------------------
@@ -65,8 +86,8 @@ class MarketDataApp:
         for book in self.books.values():
             book.clear()
             book.stale = True
-        self._listing = []
-        session.send("x", [(320, f"SEC-{next(self._ids)}"), (559, "4")])  # 559=4: all securities
+        self.subscribed.clear()  # a new connection starts with no subscriptions
+        self.request_list(session)
 
     def on_disconnect(self, session: FixSession) -> None:
         for book in self.books.values():
@@ -81,44 +102,89 @@ class MarketDataApp:
             self._on_snapshot(msg)
         elif mt == "X":
             self._on_incremental(msg)
-        elif mt == "Y":
-            log.error("market data request %s rejected: %s", msg.get(262), msg.get(58))
-        elif mt == "j":
-            log.error("request %s rejected: %s", msg.get(379), msg.get(58))
+        elif mt in ("Y", "j"):
+            self._on_reject(session, msg.get(262) if mt == "Y" else msg.get(379), msg.get(58))
+
+    def request_list(self, session: FixSession) -> None:
+        """Ask for every listed instrument (on logon, then every few minutes)."""
+        self._list_req = f"SEC-{next(self._ids)}"
+        self._listing = []
+        session.send("x", [(320, self._list_req), (559, "4")])  # 559=4: all securities
 
     # ---- handlers --------------------------------------------------------------------------
 
     def _on_security_list(self, session: FixSession, msg: FixMessage) -> None:
+        if msg.get(320) != self._list_req:
+            return  # the answer to an older request
         if msg.get(560, "0") not in ("0", "2"):
             log.error("security list request %s failed: SecurityRequestResult=%s", msg.get(320), msg.get(560))
+            return
         self._listing += [Instrument.from_security_list(e) for e in msg.group_fields(146, 55)]
         if msg.get(893, "Y") != "Y":
             return  # more fragments to come
-        listed = {i.symbol: i for i in self._listing}
+        listed = {i.symbol: i for i in self._listing if not self.wanted or i.symbol in self.wanted}
         for missing in sorted(self.wanted - listed.keys()):
             log.warning("%s is not listed by the exchange", missing)
+        now = self.clock()
         for symbol, inst in listed.items():
-            if self.wanted and symbol not in self.wanted:
-                continue
-            self.instruments[symbol] = inst
-            self.publisher.instrument(symbol, inst.to_dict())
-            self.books.setdefault(symbol, OrderBook(symbol))
-            session.send(
-                "V",
-                [
-                    (262, f"MD-{next(self._ids)}"),
-                    (263, "1"),  # snapshot + updates
-                    (264, "0"),  # full depth
-                    (267, "4"),
-                    (269, BID),
-                    (269, OFFER),
-                    (269, TRADE),
-                    (269, SETTLEMENT),
-                    (146, "1"),
-                    (55, symbol),
-                ],
-            )
-        log.info("subscribed to %d instruments", len(self.books))
+            self.delisted.pop(symbol, None)
+            old = self.instruments.get(symbol)
+            if old is not None:
+                inst.state = old.state  # the list carries no state; market data does
+            if old != inst:
+                self.instruments[symbol] = inst
+                self.publisher.instrument(symbol, inst.to_dict())
+        for symbol in self.instruments.keys() - listed.keys():
+            self.delisted.setdefault(symbol, now)
+        for symbol, since in list(self.delisted.items()):
+            final = (self.settlements.get(symbol) or {}).get("final")
+            if final or now - since >= self.keep_unsettled_s:
+                self._retire(session, symbol, "settled" if final else "never settled")
+        new = [s for s in self.instruments if s not in self.subscribed]
+        for symbol in new:
+            self._subscribe(session, symbol)
+        if new:
+            log.info("subscribed to %d instruments (%d in all)", len(new), len(self.subscribed))
+
+    def _subscribe(self, session: FixSession, symbol: str) -> None:
+        req_id = f"MD-{next(self._ids)}"
+        self.subscribed[symbol] = req_id
+        self._requests[req_id] = symbol
+        self.books.setdefault(symbol, OrderBook(symbol))
+        session.send(
+            "V",
+            [
+                (262, req_id),
+                (263, "1"),  # snapshot + updates
+                (264, "0"),  # full depth
+                (267, "4"),
+                (269, BID),
+                (269, OFFER),
+                (269, TRADE),
+                (269, SETTLEMENT),
+                (146, "1"),
+                (55, symbol),
+            ],
+        )
+
+    def _retire(self, session: FixSession, symbol: str, why: str) -> None:
+        """Stop following a contract that has left the list."""
+        req_id = self.subscribed.pop(symbol, None)
+        if req_id is not None:
+            session.send("V", [(262, req_id), (263, "2"), (264, "0"), (146, "1"), (55, symbol)])  # unsubscribe
+        for table in (self.books, self.instruments, self.last_trades, self.settlements, self.delisted):
+            table.pop(symbol, None)
+        self.publisher.retire(symbol)
+        log.info("%s retired (%s)", symbol, why)
+
+    def _on_reject(self, session: FixSession, req_id: str | None, text: str | None) -> None:
+        symbol = self._requests.get(req_id or "")
+        if symbol is not None and (symbol in self.delisted or symbol not in self.instruments):
+            if symbol in self.subscribed:
+                self.subscribed.pop(symbol)
+                self._retire(session, symbol, f"no longer at the exchange: {text}")
+            return
+        log.error("request %s rejected: %s", req_id, text)
 
     def _on_snapshot(self, msg: FixMessage) -> None:
         book = self.books.get(msg.get(55, ""))

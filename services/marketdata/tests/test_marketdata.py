@@ -149,3 +149,32 @@ def test_trading_times_state_and_settlement_are_published():
             assert p["state"] == "EXPIRED" and p["settlement"]["final"] and p["bid"] is None and p["ask"] is None
 
     run(scenario())
+
+
+def test_new_contracts_are_picked_up_and_old_ones_retired():
+    async def scenario():
+        gone = time.time() - 1
+        settles = SimInstrument("BFUT100-ERCOT-HB_HOUSTON-261110-15", high=100.0, last_trade_at=gone, settle_after_s=0)
+        waits = SimInstrument("BFUT100-PJM-WESTERN_HUB-261110-15", high=100.0, last_trade_at=gone, settle_after_s=1e9)
+        async with Harness(instruments=[*INSTRUMENTS, settles, waits]) as h:
+            await wait_for(lambda: all(h.live(s) for s in [*SYMBOLS, settles.symbol, waits.symbol]))
+            h.md.step()  # both stop trading; one settles at once, PJM-style the other does not
+            await wait_for(lambda: ((h.pub.books[settles.symbol]["settlement"]) or {}).get("final"))
+
+            new = SimInstrument("BFUT500-ERCOT-HB_NORTH-261231-16", fair=46.0)
+            h.md.list_instrument(new)
+            h.md.delist(settles.symbol)
+            h.md.delist(waits.symbol)
+            before = dict(h.app.subscribed)
+            h.app.request_list(h.session)
+            await wait_for(lambda: h.live(new.symbol))
+            assert all(h.app.subscribed[s] == before[s] for s in SYMBOLS)  # no new subscriptions for these
+            assert h.pub.retired == [settles.symbol] and settles.symbol not in h.app.books
+            assert waits.symbol in h.app.subscribed and waits.symbol in h.app.delisted  # waiting for settlement
+
+            h.gw.drop(SENDER)  # after reconnecting, the exchange rejects the old contract: it is retired
+            await wait_for(lambda: waits.symbol in h.pub.retired, timeout=8)
+            await wait_for(lambda: all(h.live(s) for s in [*SYMBOLS, new.symbol]), timeout=8)
+            assert set(h.app.subscribed) == {*SYMBOLS, new.symbol}
+
+    run(scenario())

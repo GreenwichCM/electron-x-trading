@@ -56,6 +56,11 @@ button.resume {
 .positions tr.break td {
   background: rgba(239, 138, 92, 0.12);
 }
+.positions .note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: -4px 0 10px;
+}
 
 .risk {
   margin-top: 24px;

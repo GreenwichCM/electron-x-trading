@@ -19,6 +19,8 @@ class Settings:
     session: SessionConfig
     tls: TlsConfig | None
     symbols: tuple[str, ...]
+    list_refresh_s: float  # how often the instrument list is requested again, for new contracts
+    keep_unsettled_s: float  # how long a contract that left the list is followed, waiting for settlement
     redis_url: str
     log_level: str
 
@@ -53,6 +55,8 @@ class Settings:
             session=session,
             tls=tls,
             symbols=symbols,
+            list_refresh_s=float(get("MD_LIST_REFRESH_S", "300")),
+            keep_unsettled_s=float(get("MD_KEEP_UNSETTLED_S", "259200")),
             redis_url=get("REDIS_URL", "redis://127.0.0.1:6379/0"),
             log_level=get("LOG_LEVEL", "INFO").upper(),
         )

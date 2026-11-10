@@ -120,6 +120,12 @@ awaiting settlement, until the exchange sends the settlement price on market dat
 The position is then closed at that price: its P&L becomes realized and it no longer counts against
 the position limit. An indicative settlement price is only used as the mark.
 
+The exchange keeps listing new hourly contracts, so marketdata asks for the instrument list again every
+5 minutes (`MD_LIST_REFRESH_S`) and subscribes to the new ones. A contract that leaves the list is
+still followed until its settlement price arrives, or for 3 days (`MD_KEEP_UNSETTLED_S`); then its
+Redis keys expire after 30 days. On the Positions check, settled contracts are left out once both
+sides agree on them.
+
 To try this with the simulator, `SIM_EXPIRING_IN_S=300 uv run honcho start` adds an ERCOT Houston
 contract that stops trading 5 minutes after the start and settles 30 seconds later
 (`SIM_SETTLE_AFTER_S`).

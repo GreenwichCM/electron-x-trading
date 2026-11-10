@@ -2,6 +2,7 @@ import { usePolling } from "./usePolling";
 
 type PositionsResponse = {
   exchange: Record<string, number>;
+  settled?: Record<string, number>; // closed at their settlement price: left out of the check
   dropcopy_connected: boolean;
   exchange_time: string;
   by_trader: Record<string, Record<string, number>> | null;
@@ -20,12 +21,18 @@ export default function Positions() {
     for (const [symbol, qty] of Object.entries(data.by_trader![t])) ours[symbol] = (ours[symbol] ?? 0) + qty;
   }
   const symbols = [...new Set([...Object.keys(data.exchange), ...Object.keys(ours)])].sort();
+  const settled = Object.keys(data.settled ?? {}).length;
 
   return (
     <section className="positions">
       <h2>Positions</h2>
       {!data.dropcopy_connected && <p className="error">Drop copy is not connected: exchange positions may be behind.</p>}
       {data.by_trader === null && <p className="error">orderentry is not answering.</p>}
+      {settled > 0 && (
+        <p className="note">
+          {settled} settled contract{settled === 1 ? "" : "s"} not shown: both sides agree, and they are closed.
+        </p>
+      )}
       <table>
         <thead>
           <tr>

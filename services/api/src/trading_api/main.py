@@ -202,15 +202,36 @@ def create_app(
 
     @app.get("/api/positions")
     async def positions(user: Annotated[User, Depends(require("risk.view.all"))]) -> dict[str, Any]:
-        """The exchange's positions for the whole account (drop copy) next to orderentry's, per trader."""
+        """The exchange's positions for the whole account (drop copy) next to orderentry's, per trader.
+
+        A contract with a final settlement price is closed, so it is left out (listed under `settled`) as
+        long as both sides agree on it; a break stays visible.
+        """
         raw = await app.state.redis.get(DC_POSITIONS_KEY)
         dc = json.loads(raw) if raw else {"positions": {}, "connected": False, "time": ""}
         try:
             by_trader = await oe.positions()
         except OrderEntryUnavailable, OrderEntryError:
             by_trader = None
+        exchange = dict(dc["positions"])
+        ours: dict[str, int] = {}
+        for held in (by_trader or {}).values():
+            for symbol, qty in held.items():
+                ours[symbol] = ours.get(symbol, 0) + qty
+        symbols = sorted(exchange.keys() | ours.keys())
+        books = await app.state.redis.mget([f"md:last:{s}" for s in symbols]) if symbols else []
+        settled = {}
+        for symbol, book in zip(symbols, books, strict=True):
+            settlement = (json.loads(book) if book else {}).get("settlement") or {}
+            agree = by_trader is not None and exchange.get(symbol, 0) == ours.get(symbol, 0)
+            if settlement.get("final") and agree:
+                settled[symbol] = settlement["price"]
+                exchange.pop(symbol, None)
+                for held in by_trader.values():
+                    held.pop(symbol, None)
         return {
-            "exchange": dc["positions"],
+            "exchange": exchange,
+            "settled": settled,
             "dropcopy_connected": dc["connected"],
             "exchange_time": dc["time"],
             "by_trader": by_trader,

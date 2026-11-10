@@ -67,3 +67,19 @@ def test_positions_still_show_the_exchange_side_when_orderentry_is_down():
     with TestClient(app) as client:
         body = client.get("/api/positions", headers=headers(client, "bob")).json()
         assert body["exchange"] == {} and body["by_trader"] is None
+
+
+def test_settled_contracts_leave_the_positions_check_unless_they_break():
+    redis, app = make_app()
+    with TestClient(app) as client:
+        state = {"positions": {SYMBOL: 2}, "connected": True, "time": "t"}
+        client.portal.call(redis.set, "dc:positions", json.dumps(state))
+        book = {"symbol": SYMBOL, "settlement": {"price": 44.0, "final": True}}
+        client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book))
+        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        assert body["exchange"] == {} and body["by_trader"] == {"alice": {}} and body["settled"] == {SYMBOL: 44.0}
+
+        state["positions"][SYMBOL] = 3  # the two sides disagree: keep showing it
+        client.portal.call(redis.set, "dc:positions", json.dumps(state))
+        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        assert body["exchange"] == {SYMBOL: 3} and body["settled"] == {}
