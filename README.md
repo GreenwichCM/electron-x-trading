@@ -47,7 +47,13 @@ lists what the exchange does instead: every hour of today and tomorrow for each 
 Hub, in BFUT100, BFUT500, BFUT5000 and BOPT (about 1,800 contracts), each stopping trading when its hour
 begins and settling after it ends, with new days listed as they come. The price screen has filters for
 market, hub, product and delivery day, and shows at most 200 contracts; the browser gets live prices only
-for the contracts on its screen.
+for the contracts on its screen. Each user's filters are remembered in their browser.
+
+Marketdata subscribes at the exchange in order of interest, as trading platforms do: first the contracts
+on someone's screen (the api tells it through Redis, `md:wanted:*`), then those the account holds, then
+every other contract still trading, soonest first (`MD_BACKGROUND=N` leaves that last part out). A
+contract whose trading has ended is followed only while it is on a screen or held. So the screen has live
+prices within seconds of startup, even with tens of thousands of contracts listed.
 
 ## Restarts
 
@@ -117,7 +123,8 @@ git-ignored: never commit them. Stop the development stack first; both use the a
 
 ElectronX allows one connection per SenderCompID, and keeps sequence numbers all week (they reset on
 Sunday at 06:15 UTC); orderentry and dropcopy keep theirs in `var/uat`. Marketdata subscribes to at most
-`MD_SUBSCRIBE_PER_S` (50) contracts a second, so with thousands listed the screen fills over a minute.
+`MD_SUBSCRIBE_PER_S` (50) contracts a second, those on a screen first, so they have prices within seconds;
+the rest of the 30,000 or so contracts the demo lists follow in the background.
 
 For production, ElectronX reviews the order entry session's activity in the demo environment against
 minimum message counts (logons, heartbeats, resend requests, rejects, orders, cancels). They were met on

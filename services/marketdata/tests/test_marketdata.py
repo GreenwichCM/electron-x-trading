@@ -158,6 +158,7 @@ def test_new_contracts_are_picked_up_and_old_ones_retired():
         settles = SimInstrument("BFUT100-ERCOT-HB_HOUSTON-261110-15", high=100.0, last_trade_at=gone, settle_after_s=0)
         waits = SimInstrument("BFUT100-PJM-WESTERN_HUB-261110-15", high=100.0, last_trade_at=gone, settle_after_s=1e9)
         async with Harness(instruments=[*INSTRUMENTS, settles, waits]) as h:
+            h.app.set_interest((), {settles.symbol, waits.symbol})  # trading has ended: followed because held
             await wait_for(lambda: all(h.live(s) for s in [*SYMBOLS, settles.symbol, waits.symbol]))
             h.md.step()  # both stop trading; one settles at once, PJM-style the other does not
             await wait_for(lambda: ((h.pub.books[settles.symbol]["settlement"]) or {}).get("final"))
@@ -201,5 +202,41 @@ def test_subscriptions_go_out_a_batch_a_second():
             assert requests() == 10  # the next ten wait a second
             await wait_for(lambda: requests() == 25, timeout=4)
             await wait_for(lambda: all(h.live(i.symbol) for i in many))
+
+    run(scenario())
+
+
+def test_contracts_on_a_screen_and_held_are_subscribed_first():
+    async def scenario():
+        many = [SimInstrument(f"BFUT500-ERCOT-HB_T{n:02d}-261231-15") for n in range(40)]
+        screen, held = {many[30].symbol, many[31].symbol}, {many[39].symbol}
+        async with Harness(instruments=many, subscribe_per_s=5) as h:
+            h.app.set_interest(screen, held)  # before the first batch: they jump the queue
+            await wait_for(lambda: all(h.live(s) for s in screen | held))
+            assert len(h.app.subscribed) <= 10  # the rest still follow, five a second
+
+        async with Harness(instruments=many, subscribe_per_s=5, background=False) as h:
+            await asyncio.sleep(0.6)
+            assert h.app.subscribed == {}  # nothing on a screen or held yet: nothing at all
+            h.app.set_interest(screen, held)
+            await wait_for(lambda: all(h.live(s) for s in screen | held))
+            await asyncio.sleep(1.2)
+            assert set(h.app.subscribed) == screen | held
+            h.app.set_interest(screen | {many[0].symbol}, held)  # a browser shows one more
+            await wait_for(lambda: h.live(many[0].symbol))
+
+    run(scenario())
+
+
+def test_contracts_whose_trading_ended_are_not_subscribed_in_the_background():
+    async def scenario():
+        ended = SimInstrument("BFUT500-ERCOT-HB_NORTH-261110-03", last_trade_at=time.time() - 60)
+        soon = SimInstrument("BFUT500-ERCOT-HB_NORTH-261231-14", last_trade_at=time.time() + 600)
+        async with Harness(instruments=[*INSTRUMENTS, ended, soon], subscribe_per_s=2) as h:
+            await wait_for(lambda: len(h.app.subscribed) == 3, timeout=8)  # two that never end, and soon
+            assert ended.symbol not in h.app.subscribed and ended.symbol in h.pub.instruments  # listed, not followed
+            assert next(iter(h.app.subscribed)) == soon.symbol  # the soonest to stop trading comes first
+            h.app.set_interest({ended.symbol}, ())  # someone looks at it anyway
+            await wait_for(lambda: h.live(ended.symbol))
 
     run(scenario())

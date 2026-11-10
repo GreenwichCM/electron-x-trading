@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type Status, useLiveSocket } from "./useLiveSocket";
 
 export type Trade = {
@@ -25,20 +25,33 @@ export type Book = {
 };
 
 /** Live books for the symbols in `watch`, from the api's /ws/md WebSocket. The server sends only
- *  those, so the screen can show a few contracts out of thousands. */
+ *  those, so the screen can show a few contracts out of thousands. Updates are applied once per screen
+ *  frame, so a burst of prices redraws the table once, not once per message. */
 export function useMarketData(
   token: string,
   onUnauthorized: () => void,
   watch: string[],
 ): { books: Record<string, Book>; status: Status } {
   const [books, setBooks] = useState<Record<string, Book>>({});
+  const pending = useRef<Record<string, Book>>({});
+  const frame = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+  }, []);
+  const flush = () => {
+    frame.current = null;
+    const batch = pending.current;
+    pending.current = {};
+    setBooks((prev) => ({ ...prev, ...batch }));
+  };
   const status = useLiveSocket(
     "/ws/md?watch=1",
     token,
     (msg) => {
       if (msg.type === "book") {
         const book = msg.data as Book;
-        setBooks((prev) => ({ ...prev, [book.symbol]: book }));
+        pending.current[book.symbol] = book; // only the newest per symbol is kept
+        if (frame.current === null) frame.current = requestAnimationFrame(flush);
       }
     },
     onUnauthorized,

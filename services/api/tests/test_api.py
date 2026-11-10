@@ -72,7 +72,10 @@ def test_instruments_and_latest_book():
         _, headers = login(client)
         client.portal.call(redis.set, f"instrument:{SYMBOL}", json.dumps({"symbol": SYMBOL, "tick_size": 0.25}))
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book(40.0, 40.5)))
-        assert client.get("/api/instruments", headers=headers).json() == [{"symbol": SYMBOL, "tick_size": 0.25}]
+        client.portal.call(app.state.hub.load_instruments)  # every 30 s in the background
+        assert client.get("/api/instruments", headers=headers).json() == [
+            {"symbol": SYMBOL, "state": None, "last_trade_time": None}  # only what the price screen needs
+        ]
         assert client.get(f"/api/md/{SYMBOL}", headers=headers).json()["bid"] == 40.0
         assert client.get("/api/md/NOPE", headers=headers).status_code == 404
 
@@ -135,3 +138,57 @@ def test_a_browser_that_watches_gets_only_the_books_it_shows():
 
             ws.send_json({"type": "watch", "symbols": [SYMBOL]})  # the screen changed
             assert ws.receive_json()["data"] == book(40.0, 40.5)
+
+
+def test_the_instrument_list_is_compressed_and_not_sent_again_while_unchanged():
+    redis, app = make_app()
+    with TestClient(app) as client:
+        _, headers = login(client)
+        for n in range(300):
+            symbol = f"BFUT500-ERCOT-HB_T{n}-261231-15"
+            client.portal.call(redis.set, f"instrument:{symbol}", json.dumps({"symbol": symbol, "state": "OPEN"}))
+        client.portal.call(app.state.hub.load_instruments)
+        first = client.get("/api/instruments", headers={**headers, "Accept-Encoding": "gzip"})
+        assert first.status_code == 200 and first.headers["content-encoding"] == "gzip" and len(first.json()) == 300
+        etag = first.headers["etag"]
+        again = client.get("/api/instruments", headers={**headers, "If-None-Match": etag})
+        assert again.status_code == 304 and again.content == b""
+
+        client.portal.call(redis.set, "instrument:BFUT500-PJM-WESTERN_HUB-261231-15", json.dumps({"symbol": "x"}))
+        client.portal.call(app.state.hub.load_instruments)
+        changed = client.get("/api/instruments", headers={**headers, "If-None-Match": etag})
+        assert changed.status_code == 200 and changed.headers["etag"] != etag
+
+
+def test_marketdata_is_told_what_the_browsers_show():
+    redis, app = make_app()
+    other = "BFUT500-ERCOT-HB_NORTH-261231-16"
+    with TestClient(app) as client:
+        token, _ = login(client)
+        client.portal.call(app.state.hub.ready.wait)
+        with client.websocket_connect("/ws/md?watch=1") as a, client.websocket_connect("/ws/md?watch=1") as b:
+            for ws in (a, b):
+                ws.send_json({"type": "auth", "token": token})
+                assert ws.receive_json()["type"] == "welcome"
+            a.send_json({"type": "watch", "symbols": [SYMBOL]})
+            b.send_json({"type": "watch", "symbols": [SYMBOL, other]})
+            key = next(iter(client.portal.call(redis.keys, "md:wanted:*")), None)
+            for _ in range(100):
+                key = next(iter(client.portal.call(redis.keys, "md:wanted:*")), None)
+                if key and len(json.loads(client.portal.call(redis.get, key))) == 2:
+                    break
+                client.portal.call(__import__("asyncio").sleep, 0.05)
+            assert json.loads(client.portal.call(redis.get, key)) == sorted([SYMBOL, other])
+            assert 0 < client.portal.call(redis.ttl, key) <= 90  # gone soon if this api stops
+
+
+def test_an_empty_instrument_list_still_has_an_etag():
+    _, app = make_app()
+    with TestClient(app) as client:
+        _, headers = login(client)
+        first = client.get("/api/instruments", headers=headers)
+        assert first.json() == [] and first.headers["etag"]
+        assert (
+            client.get("/api/instruments", headers={**headers, "If-None-Match": first.headers["etag"]}).status_code
+            == 304
+        )

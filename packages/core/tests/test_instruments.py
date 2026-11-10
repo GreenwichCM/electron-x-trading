@@ -14,7 +14,7 @@ def test_symbol_parse():
 
 def test_symbol_parse_hyphenated_market_and_hour_24():
     s = Symbol.parse("BFUT-ISO-NE-.H.INTERNAL_HUB-260901-24")
-    assert s.market is Market.ISO_NE and s.product_variant is None
+    assert s.market is Market.ISO_NE and s.product_variant is None and s.market.value == "ISONE"
     assert s.expiry == datetime(2026, 9, 2, 0)
 
 
@@ -54,3 +54,17 @@ def test_symbol_is_immutable():
 
 def test_data_start_is_ercot_launch():
     assert DATA_START_DATE == date(2025, 12, 10)
+
+
+def test_symbols_as_the_exchange_lists_them():
+    # from the ElectronX demo's SecurityList: ISONE without a hyphen, and letters after the size
+    s = Symbol.parse("BFUT2000E-ISONE-HB_INTERNAL-261111-10")
+    assert (s.market, s.product_code, s.product_variant, s.location) == (
+        Market.ISO_NE,
+        "BFUT2000E",
+        2000,
+        "HB_INTERNAL",
+    )
+    assert Symbol.parse("BFUT700Y-NYISO-ZONE_A-261108-07").product_code == "BFUT700Y"
+    assert Symbol.parse("BFUT200S-SPP-INT_MISO-261109-09").expires_at == utc(2026, 11, 9, 15)  # Central
+    assert Symbol.parse("BOPT-ISONE-HB_TEST-261107-24").expires_at == utc(2026, 11, 8, 5)  # Eastern

@@ -22,7 +22,7 @@ class Market(StrEnum):
     MISO = "MISO"
     CAISO = "CAISO"
     SPP = "SPP"
-    ISO_NE = "ISO-NE"
+    ISO_NE = "ISONE"  # as in ElectronX symbols; "ISO-NE" is accepted when parsing
     NYISO = "NYISO"
 
 
@@ -67,9 +67,10 @@ TICK_SIZE = 0.25  # USD / MWh
 LOT_SIZE_MWH = 1.0  # 1 lot = 1 contract = 1 MWh
 
 
-_MARKET_ALT = "|".join(re.escape(m.value) for m in sorted(Market, key=lambda m: -len(m.value)))
+_MARKET_NAMES = {m.value: m for m in Market} | {"ISO-NE": Market.ISO_NE}
+_MARKET_ALT = "|".join(re.escape(name) for name in sorted(_MARKET_NAMES, key=lambda n: -len(n)))
 SYMBOL_RE = re.compile(
-    rf"^(?P<product>{'|'.join(p.value for p in Product)})(?P<variant>\d*)"
+    rf"^(?P<product>{'|'.join(p.value for p in Product)})(?P<variant>\d*)(?P<suffix>[A-Z]*)"
     rf"-(?P<market>{_MARKET_ALT})"
     r"-(?P<location>.+)"
     r"-(?P<expiry_date>\d{6})-(?P<expiry_hour>\d{2}|X\d)$"
@@ -78,6 +79,8 @@ SYMBOL_RE = re.compile(
 
 class Symbol(BaseModel):
     """A parsed contract symbol: ``<PRODUCT>-<MARKET>-<LOCATION>-<YYMMDD>-<HH>``.
+
+    The product is BFUT or BOPT, often with a size and sometimes a letter after it: BFUT500, BFUT2000Y.
 
     The date and hour ending are in the ISO's time zone (MARKET_TZ). When clocks fall back, the repeated
     hour has the code ``X2`` instead of ``02``.
@@ -91,6 +94,7 @@ class Symbol(BaseModel):
     raw: str
     product: Product
     product_variant: int | None = Field(None, description="Numeric suffix on the product code, e.g. 500 in BFUT500.")
+    product_suffix: str = Field("", description="Letters after the size, e.g. Y in BFUT2000Y.")
     market: Market
     location: str = Field(description="Hub / zone, e.g. HB_NORTH, ZONE_A.")
     expiry_date: date
@@ -108,7 +112,8 @@ class Symbol(BaseModel):
             raw=symbol,
             product=Product(g["product"]),
             product_variant=int(g["variant"]) if g["variant"] else None,
-            market=Market(g["market"]),
+            product_suffix=g["suffix"],
+            market=_MARKET_NAMES[g["market"]],
             location=g["location"],
             expiry_date=datetime.strptime(g["expiry_date"], "%y%m%d").date(),
             expiry_hour=int(g["expiry_hour"][1:] if repeated else g["expiry_hour"]),
@@ -117,8 +122,8 @@ class Symbol(BaseModel):
 
     @property
     def product_code(self) -> str:
-        """Product with its variant suffix, e.g. ``BFUT500``."""
-        return f"{self.product.value}{self.product_variant or ''}"
+        """Product with its size and any letter after it, e.g. ``BFUT500`` or ``BFUT2000Y``."""
+        return f"{self.product.value}{self.product_variant or ''}{self.product_suffix}"
 
     @property
     def expiry(self) -> datetime:

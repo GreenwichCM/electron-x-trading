@@ -1,10 +1,18 @@
-"""Market data fan-out: one Redis subscription per api process, shared by every connected browser."""
+"""Market data fan-out: one Redis subscription per api process, shared by every connected browser.
+
+The hub also tells marketdata what its browsers show (publish_wanted), so those contracts are subscribed
+at the exchange first, and keeps the instrument list in memory for /api/instruments (refresh_instruments).
+"""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
+import socket
+import time
 from typing import Any
 
 from redis.asyncio import Redis
@@ -13,6 +21,10 @@ from redis.exceptions import RedisError
 log = logging.getLogger("api.hub")
 
 Payload = dict[str, Any]
+WANTED_KEY = f"md:wanted:{socket.gethostname()}-{os.getpid()}"  # one per api process; marketdata reads them all
+WANTED_TTL_S = 90  # gone soon after this process stops
+#: What the price screen needs of each instrument; the rest stays in Redis.
+INSTRUMENT_FIELDS = ("symbol", "state", "last_trade_time")
 
 
 class ClientFeed:
@@ -58,6 +70,10 @@ class MarketDataHub:
         self.redis = redis
         self.clients: set[ClientFeed] = set()
         self.ready = asyncio.Event()  # set once the Redis subscription is active
+        self.instrument_list = b""  # JSON of every instrument, INSTRUMENT_FIELDS only
+        self.instrument_etag = ""
+        self.instrument_count = 0
+        self._instruments_loaded = asyncio.Event()
 
     def connect(self, watching: set[str] | None = None) -> ClientFeed:
         feed = ClientFeed(watching)
@@ -85,6 +101,56 @@ class MarketDataHub:
                 self.ready.clear()
                 log.warning("Redis subscription lost (%s); retrying in %.0fs", exc, self.RETRY_S)
                 await asyncio.sleep(self.RETRY_S)
+
+    def wanted(self) -> set[str]:
+        """Every symbol some browser connected here shows."""
+        out: set[str] = set()
+        for feed in self.clients:
+            if feed.watching is not None:
+                out |= feed.watching
+        return out
+
+    async def publish_wanted(self, every_s: float = 0.5, refresh_s: float = 30.0) -> None:
+        """Keep marketdata told what the browsers here show: at once when it changes, and every
+        `refresh_s` so the key does not expire while this process runs."""
+        last: set[str] | None = None
+        written = 0.0
+        while True:
+            await asyncio.sleep(every_s)
+            wanted = self.wanted()
+            if wanted == last and time.monotonic() - written < refresh_s:
+                continue
+            try:
+                await self.redis.set(WANTED_KEY, json.dumps(sorted(wanted)), ex=WANTED_TTL_S)
+                last, written = wanted, time.monotonic()
+            except (RedisError, OSError) as exc:
+                log.warning("could not tell marketdata what is on screen: %s", exc)
+
+    async def refresh_instruments(self, every_s: float = 30.0, while_empty_s: float = 2.0) -> None:
+        """Reload the instrument list from Redis now and every `every_s` (every `while_empty_s` while there
+        is none yet: marketdata may still be starting); browsers get it from memory."""
+        while True:
+            try:
+                await self.load_instruments()
+            except (RedisError, OSError) as exc:
+                log.warning("could not load the instrument list: %s", exc)
+            await asyncio.sleep(every_s if self.instrument_count else while_empty_s)
+
+    async def load_instruments(self) -> None:
+        found = await self.instruments()
+        rows = [{k: found[s].get(k) for k in INSTRUMENT_FIELDS} for s in sorted(found)]
+        data = json.dumps(rows, separators=(",", ":")).encode()
+        if data != self.instrument_list:
+            self.instrument_list = data
+            self.instrument_etag = '"' + hashlib.sha1(data).hexdigest()[:20] + '"'
+            self.instrument_count = len(rows)
+        self._instruments_loaded.set()
+
+    async def instrument_list_now(self) -> tuple[bytes, str]:
+        """The instrument list and its ETag, loading it first if it never has been."""
+        if not self._instruments_loaded.is_set():
+            await self.load_instruments()
+        return self.instrument_list, self.instrument_etag
 
     async def latest(self) -> dict[str, Payload]:
         """The last book for every symbol, from the md:last:<symbol> keys."""

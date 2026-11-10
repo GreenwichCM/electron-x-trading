@@ -13,7 +13,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from trading_core import ALERTS_STREAM, BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, TraderBlock, decode_blocks
@@ -83,6 +84,8 @@ def create_app(
         tasks = [
             asyncio.create_task(app.state.hub.run(), name="md-hub"),
             asyncio.create_task(app.state.orders.run(), name="order-hub"),
+            asyncio.create_task(app.state.hub.publish_wanted(), name="wanted"),
+            asyncio.create_task(app.state.hub.refresh_instruments(), name="instruments"),
         ]
         if settings.db is not None:  # who each ElectronX id belongs to, for orders from the ElectronX screen
             rules = follow_rules(settings.db, app.state.orders.set_rules, settings.rules_refresh_s, appname="api")
@@ -97,6 +100,7 @@ def create_app(
             await client.aclose()
 
     app = FastAPI(title="ElectronX trading api", lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=2000)  # the instrument list shrinks about tenfold
 
     # ---- authentication and permissions ----------------------------------------------------
 
@@ -157,9 +161,17 @@ def create_app(
         return user.to_dict()
 
     @app.get("/api/instruments")
-    async def instruments(user: Annotated[User, Depends(require("md.view"))]) -> list[dict[str, Any]]:
-        found = await app.state.hub.instruments()
-        return [found[s] for s in sorted(found)]
+    async def instruments(request: Request, user: Annotated[User, Depends(require("md.view"))]) -> Response:
+        """Every listed contract: symbol, state and last trade time (thousands on the real exchange).
+
+        Served from memory with an ETag: a browser asking again gets "304 Not Modified", no body, until the
+        list changes; the browser then uses its cached copy.
+        """
+        data, etag = await app.state.hub.instrument_list_now()
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+        if etag and request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=data, media_type="application/json", headers=headers)
 
     @app.get("/api/md/{symbol}")
     async def latest_book(symbol: str, user: Annotated[User, Depends(require("md.view"))]) -> dict[str, Any]:

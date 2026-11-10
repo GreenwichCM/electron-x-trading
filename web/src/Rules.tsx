@@ -39,7 +39,7 @@ const LIMITS = {
 type LimitName = keyof typeof LIMITS;
 const LIMIT_NAMES = Object.keys(LIMITS) as LimitName[];
 const PER_TRADER: LimitName[] = ["max_open_orders", "max_loss"];
-const MARKETS = ["*", "ERCOT", "PJM", "MISO", "CAISO", "SPP", "ISO-NE", "NYISO"];
+const MARKETS = ["*", "ERCOT", "PJM", "MISO", "CAISO", "SPP", "ISONE", "NYISO"];
 
 const show = (v: unknown) => (v == null || v === "" ? "not set" : v === true ? "yes" : v === false ? "no" : String(v));
 const when = (iso: string | null) => (iso ? new Date(iso + (iso.endsWith("Z") ? "" : "Z")).toLocaleString() : "");

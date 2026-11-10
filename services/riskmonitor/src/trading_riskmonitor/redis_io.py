@@ -95,11 +95,15 @@ async def follow_books(redis: Redis, engine: RiskEngine) -> None:
 
 
 async def refresh_instruments(redis: Redis, engine: RiskEngine, every_s: float = 30.0) -> None:
+    """Keep the price limits and trading times of the contracts held up to date (all of them were read
+    once at startup; with tens of thousands listed, only the held ones are read again)."""
     while True:
         await asyncio.sleep(every_s)
+        held = sorted({symbol for _, symbol in engine.holdings})
         try:
-            for inst in await _load_prefix(redis, "instrument:"):
-                engine.on_instrument(inst)
+            for raw in await redis.mget([f"instrument:{s}" for s in held]) if held else []:
+                if raw is not None:
+                    engine.on_instrument(json.loads(raw))
         except (RedisError, OSError) as exc:
             log.warning("could not refresh instruments: %s", exc)
 

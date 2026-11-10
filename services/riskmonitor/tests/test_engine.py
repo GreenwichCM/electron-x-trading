@@ -132,3 +132,21 @@ def test_fills_from_the_electronx_screen_go_to_the_trader_with_that_electronx_id
     p = snap["traders"]["alice"]["positions"][X]
     assert (p["qty"], p["screen_qty"]) == (5, 3)
     assert snap["unattributed_fills"] == 1  # nobody has that ElectronX id
+
+
+def test_only_the_contracts_held_are_read_again():
+    async def scenario():
+        from trading_riskmonitor.redis_io import refresh_instruments
+
+        redis = FakeAsyncRedis()
+        e = RiskEngine(clock=Clock())
+        e.on_order(order("A1", "alice"))
+        e.on_fill(fill("E1", "A1", "BUY", 1, 40.0))
+        await redis.set(f"instrument:{X}", json.dumps({"symbol": X, "high_limit": 60.0}))
+        await redis.set(f"instrument:{Y}", json.dumps({"symbol": Y, "high_limit": 70.0}))  # not held
+        task = asyncio.create_task(refresh_instruments(redis, e, every_s=0.01))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        assert e.instruments[X]["high_limit"] == 60.0 and Y not in e.instruments
+
+    asyncio.run(scenario())

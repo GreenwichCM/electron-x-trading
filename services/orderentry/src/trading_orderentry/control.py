@@ -7,6 +7,7 @@ No `from __future__ import annotations` here: FastAPI reads the annotations at r
 """
 
 import hmac
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -28,7 +29,12 @@ class CancelRequest(BaseModel):
     trader: str
 
 
-def create_control_app(oe: OrderEntryApp, token: str) -> FastAPI:
+def create_control_app(
+    oe: OrderEntryApp, token: str, load_instrument: Callable[[str], Awaitable[None]] | None = None
+) -> FastAPI:
+    """`load_instrument` brings a contract's tick size, limits and state up to date before an order for it
+    is checked."""
+
     def check_token(x_internal_token: Annotated[str, Header()] = "") -> None:
         if not hmac.compare_digest(x_internal_token, token):
             raise HTTPException(status_code=401, detail="bad internal token")
@@ -40,7 +46,9 @@ def create_control_app(oe: OrderEntryApp, token: str) -> FastAPI:
         return {"fix": "logged_on" if oe.session is not None and oe.session.logged_on else "down"}
 
     @app.post("/orders")
-    def new_order(body: NewOrder) -> dict[str, Any]:
+    async def new_order(body: NewOrder) -> dict[str, Any]:
+        if load_instrument is not None:
+            await load_instrument(body.symbol)
         return oe.submit(body.trader, body.symbol, body.side, body.qty, body.price, body.tif).to_dict()
 
     @app.post("/orders/{cl_ord_id}/cancel")

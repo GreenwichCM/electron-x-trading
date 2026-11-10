@@ -11,12 +11,13 @@ export type Contract = {
   order: number; // sorts the hours of a day: 1..24, X2 straight after 02
 };
 
-const RE = /^(B[A-Z]+\d*)-(ERCOT|PJM|MISO|CAISO|SPP|ISO-NE|NYISO)-(.+)-(\d{2})(\d{2})(\d{2})-(\d{2}|X\d)$/;
+const RE = /^(B[A-Z]+\d*[A-Z]*)-(ERCOT|PJM|MISO|CAISO|SPP|ISONE|ISO-NE|NYISO)-(.+)-(\d{2})(\d{2})(\d{2})-(\d{2}|X\d)$/;
 
 export function parseSymbol(symbol: string): Contract | null {
   const m = RE.exec(symbol);
   if (!m) return null;
   const [, product, market, hub, yy, mm, dd, hour] = m;
   const order = hour.startsWith("X") ? Number(hour.slice(1)) + 0.5 : Number(hour);
-  return { symbol, product, market, hub, day: `20${yy}-${mm}-${dd}`, hour, order };
+  const iso = market === "ISO-NE" ? "ISONE" : market;
+  return { symbol, product, market: iso, hub, day: `20${yy}-${mm}-${dd}`, hour, order };
 }

@@ -172,3 +172,40 @@ def test_sequence_numbers_survive_a_process_restart(tmp_path):
         await gw.stop()
 
     run(scenario())
+
+
+def test_the_debug_log_never_shows_the_password(caplog):
+    import logging
+
+    async def scenario():
+        gw = SimGateway({"TEST-OE01": "s3cret-pass"})
+        port = await gw.start()
+        cfg = SessionConfig(
+            name="oe", host="127.0.0.1", port=port, sender_comp_id="TEST-OE01", target_comp_id="EXI",
+            password="s3cret-pass",
+        )  # fmt: skip
+        session = FixSession(cfg, _QuietForLog(), SeqStore())
+        task = asyncio.create_task(session.run())
+        for _ in range(250):
+            if session.logged_on:
+                break
+            await asyncio.sleep(0.02)
+        assert session.logged_on
+        await session.stop()
+        await task
+        await gw.stop()
+
+    with caplog.at_level(logging.DEBUG, logger="fix.oe"):
+        asyncio.run(asyncio.wait_for(scenario(), 20))
+    assert "554=***" in caplog.text and "s3cret-pass" not in caplog.text
+
+
+class _QuietForLog:
+    def on_logon(self, session):
+        pass
+
+    def on_disconnect(self, session):
+        pass
+
+    def on_app_message(self, session, msg):
+        pass

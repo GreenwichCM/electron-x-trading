@@ -10,7 +10,12 @@ passed, or the exchange rejects the subscription; then it is retired: unsubscrib
 its Redis keys left to expire.
 
 Subscriptions go out at most `subscribe_per_s` a second: the exchange throttles a session that sends
-too fast, and a burst of thousands of requests at every logon would look like runaway activity.
+too fast, and a burst of thousands of requests at every logon would look like runaway activity. They go
+in order of interest, as on other trading platforms:
+  1. contracts on someone's screen (set_interest: the api publishes what its browsers show)
+  2. contracts the account holds (their marks and settlement prices are needed for risk)
+  3. in the background (unless turned off), every other contract still trading, soonest end first
+A contract whose trading has ended is subscribed only if it is on a screen or held.
 
 The Snapshot API (snapshot.py), when configured, adds the exchange's marks (the day-ahead price) to each
 book, and its settlement prices stand in until FIX market data sends one.
@@ -41,6 +46,22 @@ AGGRESSOR = {"1": "BUY", "2": "SELL"}
 DEPTH_LEVELS = 10
 KEEP_UNSETTLED_S = 3 * 24 * 3600
 SUBSCRIBE_PER_S = 50
+ENDED_STATES = {"EXPIRED", "TERMINATED"}  # TradingSessionID(336)
+
+
+def _end_of_trading(symbol: str, inst: Instrument) -> float:
+    """When trading in the contract stops: the exchange's last trade time, else the end of its hour."""
+    if inst.last_trade_time:
+        try:
+            return datetime.fromisoformat(inst.last_trade_time).timestamp()
+        except ValueError:
+            pass
+    try:
+        return Symbol.parse(symbol).expires_at.timestamp()
+    except ValueError:
+        return float("inf")  # not an ElectronX symbol: never ends
+
+
 SAME_PRICE = 0.01  # FIX and the Snapshot API may round a settlement price differently
 
 
@@ -75,6 +96,7 @@ class MarketDataApp:
         keep_unsettled_s: float = KEEP_UNSETTLED_S,
         clock: Callable[[], float] = time.time,
         subscribe_per_s: int = SUBSCRIBE_PER_S,
+        background: bool = True,
     ):
         self.publisher = publisher
         self.wanted = set(symbols)
@@ -93,12 +115,17 @@ class MarketDataApp:
         self._ids = itertools.count(1)
         self._disagree: set[str] = set()  # symbols whose two settlement prices differ, already reported
         self.subscribe_per_s = subscribe_per_s
-        self._to_subscribe: list[str] = []  # waiting their turn
+        self.background = background  # subscribe to every contract still trading, after the ones of interest
+        self.on_screen: set[str] = set()  # contracts some browser shows
+        self.held: set[str] = set()  # contracts the account holds
+        self._still_trading: list[str] = []  # soonest end of trading first
         self._next_batch: asyncio.TimerHandle | None = None
+        self._session: FixSession | None = None
 
     # ---- SessionApp ------------------------------------------------------------------------
 
     def on_logon(self, session: FixSession) -> None:
+        self._session = session
         for book in self.books.values():
             book.clear()
             book.stale = True
@@ -204,36 +231,59 @@ class MarketDataApp:
             final = (self.settlements.get(symbol) or {}).get("final")
             if final or now - since >= self.keep_unsettled_s:
                 self._retire(session, symbol, "settled" if final else "never settled")
-        waiting = set(self._to_subscribe)
-        new = [s for s in self.instruments if s not in self.subscribed and s not in waiting]
-        if new:
-            self._to_subscribe += new
-            log.info("subscribing to %d new instruments, %d a second", len(new), self.subscribe_per_s)
-            if self._next_batch is None:
-                self._subscribe_batch(session)
+        ends = {s: _end_of_trading(s, i) for s, i in self.instruments.items() if i.state not in ENDED_STATES}
+        self._still_trading = sorted((s for s, end in ends.items() if end > now), key=lambda s: ends[s])
+        log.info(
+            "%d instruments listed, %d still trading%s",
+            len(self.instruments),
+            len(self._still_trading),
+            "" if self.background else " (subscribing only to those on a screen or held)",
+        )
+        self._kick(session)
+
+    def set_interest(self, on_screen: Collection[str], held: Collection[str]) -> None:
+        """Contracts some browser shows, and contracts the account holds: subscribed before any other."""
+        on_screen, held = set(on_screen), set(held)
+        if (on_screen, held) == (self.on_screen, self.held):
+            return
+        self.on_screen, self.held = on_screen, held
+        if self._session is not None:
+            self._kick(self._session)
+
+    def _kick(self, session: FixSession) -> None:
+        if self._next_batch is None and session.logged_on:
+            self._subscribe_batch(session)
+
+    def _next_symbols(self, n: int) -> list[str]:
+        """Up to `n` contracts to subscribe to next, the most interesting first."""
+        out: list[str] = []
+        taken: set[str] = set()
+        for group in (sorted(self.on_screen), sorted(self.held), self._still_trading if self.background else ()):
+            for symbol in group:
+                if symbol in self.instruments and symbol not in self.subscribed and symbol not in taken:
+                    out.append(symbol)
+                    taken.add(symbol)
+                    if len(out) == n:
+                        return out
+        return out
 
     def _subscribe_batch(self, session: FixSession) -> None:
-        """Subscribe to the next `subscribe_per_s` instruments; the rest a second later."""
+        """Subscribe to the next `subscribe_per_s` contracts; look for more a second later."""
         self._next_batch = None
         if not session.logged_on:
             return
-        batch, self._to_subscribe = (
-            self._to_subscribe[: self.subscribe_per_s],
-            self._to_subscribe[self.subscribe_per_s :],
-        )
+        batch = self._next_symbols(self.subscribe_per_s)
         for symbol in batch:
-            if symbol in self.instruments and symbol not in self.subscribed:
-                self._subscribe(session, symbol)
-        if self._to_subscribe:
+            self._subscribe(session, symbol)
+        if batch:
             self._next_batch = asyncio.get_running_loop().call_later(1.0, self._subscribe_batch, session)
-        elif batch:
-            log.info("subscribed to %d instruments", len(self.subscribed))
+            if len(batch) < self.subscribe_per_s:
+                log.info("subscribed to %d instruments", len(self.subscribed))
 
     def _stop_subscribing(self) -> None:
         if self._next_batch is not None:
             self._next_batch.cancel()
             self._next_batch = None
-        self._to_subscribe.clear()
 
     def _subscribe(self, session: FixSession, symbol: str) -> None:
         req_id = f"MD-{next(self._ids)}"

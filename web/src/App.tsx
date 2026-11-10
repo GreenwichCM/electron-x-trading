@@ -12,7 +12,7 @@ import { useMarketData } from "./useMarketData";
 import { useOrders } from "./useOrders";
 
 function Workspace({ user, token, onSignOut }: { user: User; token: string; onSignOut: () => void }) {
-  const board = useBoard();
+  const board = useBoard(user.id);
   const { books, status } = useMarketData(token, onSignOut, board.rows);
   const { orders } = useOrders(token, onSignOut);
   const [preset, setPreset] = useState<TicketPreset | null>(null);

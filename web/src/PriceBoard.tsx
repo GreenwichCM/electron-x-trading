@@ -26,30 +26,57 @@ const byScreen = (a: Contract, b: Contract) =>
   a.product.localeCompare(b.product) ||
   a.order - b.order;
 
-/** Every listed contract, the filters, and the contracts they select (at most MAX_ROWS). */
-export function useBoard() {
-  const instruments = usePolling<Instrument[]>("/api/instruments", 30000);
-  const [filters, setFilters] = useState<Filters>(ALL);
+function savedFilters(key: string): Filters {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? { ...ALL, ...JSON.parse(raw) } : ALL;
+  } catch {
+    return ALL;
+  }
+}
+
+/** Every listed contract, the filters, and the contracts they select (at most MAX_ROWS). Each user's
+ *  filters are remembered in this browser, so the same contracts are on screen (and get live prices
+ *  first) the next time they sign in. */
+export function useBoard(userId: string) {
+  // Asked often, but cheap: while the list is unchanged the api answers "304 Not Modified" with no body.
+  const instruments = usePolling<Instrument[]>("/api/instruments", 10000);
+  const key = `board-filters:${userId}`;
+  const [filters, setFiltersState] = useState<Filters>(() => savedFilters(key));
+  const setFilters = (next: Filters) => {
+    setFiltersState(next);
+    try {
+      window.localStorage.setItem(key, JSON.stringify(next));
+    } catch {
+      // private window or storage blocked: the filters just are not remembered
+    }
+  };
   return useMemo(() => {
     const now = Date.now();
     const all = (instruments ?? [])
       .filter((i) => !filters.tradingOnly || trading(i, now))
       .map((i) => parseSymbol(i.symbol) ?? { symbol: i.symbol, product: "", market: "", hub: "", day: "", hour: "", order: 0 });
-    const inMarket = all.filter((c) => !filters.market || c.market === filters.market);
-    const selected = inMarket
-      .filter((c) => !filters.hub || c.hub === filters.hub)
-      .filter((c) => !filters.product || c.product === filters.product)
-      .filter((c) => !filters.day || c.day === filters.day)
-      .sort(byScreen);
+    // A remembered choice that no longer exists (a delivery day gone by) counts as "all".
+    const markets = unique(all.map((c) => c.market).filter(Boolean));
+    const market = markets.includes(filters.market) ? filters.market : "";
+    const inMarket = all.filter((c) => !market || c.market === market);
     const options = {
-      market: unique(all.map((c) => c.market).filter(Boolean)),
+      market: markets,
       hub: unique(inMarket.map((c) => c.hub).filter(Boolean)),
       product: unique(inMarket.map((c) => c.product).filter(Boolean)),
       day: unique(inMarket.map((c) => c.day).filter(Boolean)),
     };
+    const hub = options.hub.includes(filters.hub) ? filters.hub : "";
+    const product = options.product.includes(filters.product) ? filters.product : "";
+    const day = options.day.includes(filters.day) ? filters.day : "";
+    const selected = inMarket
+      .filter((c) => !hub || c.hub === hub)
+      .filter((c) => !product || c.product === product)
+      .filter((c) => !day || c.day === day)
+      .sort(byScreen);
     return {
       loaded: instruments !== null,
-      filters,
+      filters: { ...filters, market, hub, product, day },
       setFilters,
       options,
       matching: selected.length,

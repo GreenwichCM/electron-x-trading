@@ -294,3 +294,30 @@ def test_positions_from_the_electronx_screen_count_against_the_position_limit():
             assert fits.status != Status.REJECTED
 
     run(scenario())
+
+
+def test_an_order_loads_its_contract_from_redis():
+    import json as json_
+
+    from fakeredis import FakeAsyncRedis
+    from trading_orderentry.__main__ import instrument_loader
+
+    redis = FakeAsyncRedis()
+    oe = OrderEntryApp(
+        MemorySink(),
+        account="TA-TEST",
+        default_trader="trader@example.com",
+        rules=TradingRules.everyone(
+            ["alice"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
+        ),
+    )
+    order = {"trader": "alice", "symbol": SYMBOL, "side": "BUY", "qty": 1, "price": 40.0}
+    headers = {"X-Internal-Token": TOKEN}
+    with TestClient(create_control_app(oe, TOKEN, instrument_loader(redis, oe))) as client:
+        assert "unknown instrument" in client.post("/orders", json=order, headers=headers).json()["text"]
+
+        listed = {"symbol": SYMBOL, "tick_size": 0.25, "low_limit": 0.0, "high_limit": 500.0, "state": "OPEN"}
+        client.portal.call(redis.set, f"instrument:{SYMBOL}", json_.dumps(listed))
+        second = client.post("/orders", json=order, headers=headers).json()
+        assert second["text"] == "not connected to the exchange"  # the contract was found; only the session is missing
+        assert oe.instruments[SYMBOL].state == "OPEN"

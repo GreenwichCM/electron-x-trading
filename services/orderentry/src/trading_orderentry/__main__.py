@@ -9,6 +9,7 @@ import logging
 import signal
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import uvicorn
@@ -28,12 +29,34 @@ from .sink import RedisOrderSink
 log = logging.getLogger("oe")
 
 SAVE_EVERY_S = 1.0
+INSTRUMENT_FRESH_S = 5.0  # an order reloads its contract from Redis if the copy here is older than this
 SAVE_AT_LEAST_EVERY_S = 60.0  # even with no changes, so the file shows when orderentry last ran
 
 
-async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 5.0) -> None:
-    """Tick sizes and limits come from marketdata, which keeps instrument:<symbol> current in Redis.
-    Often, because new contracts are listed all the time and cannot be traded until they are here."""
+def instrument_loader(redis: Redis, oe: OrderEntryApp) -> Callable[[str], Awaitable[None]]:
+    """Reads one contract from Redis when an order for it comes in, unless the copy here is fresh. With
+    tens of thousands of contracts listed, that is far cheaper than reading them all every few seconds,
+    and the contract's state (OPEN, CLOSED, EXPIRED) is never more than a few seconds old."""
+    loaded: dict[str, float] = {}
+
+    async def load(symbol: str) -> None:
+        if time.monotonic() - loaded.get(symbol, -INSTRUMENT_FRESH_S) < INSTRUMENT_FRESH_S:
+            return
+        try:
+            raw = await redis.get(f"instrument:{symbol}")
+        except (RedisError, OSError) as exc:
+            log.warning("could not read %s from Redis (%s); checking the order with what is known", symbol, exc)
+            return
+        if raw is not None:
+            oe.instruments[symbol] = Instrument.from_dict(json.loads(raw))
+            loaded[symbol] = time.monotonic()
+
+    return load
+
+
+async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 300.0) -> None:
+    """Tick sizes and limits come from marketdata, which keeps instrument:<symbol> current in Redis. Each
+    order also reloads its own contract (instrument_loader); this full reload is only a fallback."""
     while True:
         try:
             keys = [k async for k in redis.scan_iter(match="instrument:*")]
@@ -138,7 +161,7 @@ async def main() -> None:
 
     control = uvicorn.Server(
         uvicorn.Config(
-            create_control_app(oe, settings.internal_token),
+            create_control_app(oe, settings.internal_token, instrument_loader(redis, oe)),
             host=settings.control_host,
             port=settings.control_port,
             log_level="warning",
