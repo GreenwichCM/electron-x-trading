@@ -126,6 +126,14 @@ still followed until its settlement price arrives, or for 3 days (`MD_KEEP_UNSET
 Redis keys expire after 30 days. On the Positions check, settled contracts are left out once both
 sides agree on them.
 
+With `SNAPSHOT_URL` and `SNAPSHOT_API_KEY` set in `services/marketdata/.env`, marketdata also asks the
+ElectronX Snapshot API every minute for the exchange's marks and settlement prices. A Bounded Future
+whose book is too wide or empty is then marked at the exchange's day-ahead price, kept inside the bid
+and ask; never a BOPT, whose day-ahead price is its strike. A settlement price from the Snapshot API
+closes a position just like one over FIX; FIX comes first, and if the two differ by more than a cent
+marketdata logs a warning. The simulator has no Snapshot API, so leave both empty in development. To
+check a key: `uv run --env-file services/marketdata/.env python -m trading_marketdata.snapshot ERCOT`.
+
 To try this with the simulator, `SIM_EXPIRING_IN_S=300 uv run honcho start` adds an ERCOT Houston
 contract that stops trading 5 minutes after the start and settles 30 seconds later
 (`SIM_SETTLE_AFTER_S`).

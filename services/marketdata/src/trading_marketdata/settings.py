@@ -15,12 +15,25 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class Snapshot:
+    """The ElectronX Snapshot API (REST), for the exchange's marks and settlement prices."""
+
+    url: str  # https://beta.electronx.com or https://trade.electronx.com
+    api_key: str
+    poll_s: float
+
+    def __repr__(self) -> str:  # never print the key
+        return f"Snapshot(url={self.url!r}, poll_s={self.poll_s})"
+
+
+@dataclass(frozen=True)
 class Settings:
     session: SessionConfig
     tls: TlsConfig | None
     symbols: tuple[str, ...]
     list_refresh_s: float  # how often the instrument list is requested again, for new contracts
     keep_unsettled_s: float  # how long a contract that left the list is followed, waiting for settlement
+    snapshot: Snapshot | None  # None: not used
     redis_url: str
     log_level: str
 
@@ -50,6 +63,14 @@ class Settings:
                 client_key=Path(get("MD_CLIENT_KEY", "certs/client.key")),
                 server_name=get("MD_TLS_SERVER_NAME"),
             )
+        snapshot = None
+        url, key = get("SNAPSHOT_URL"), get("SNAPSHOT_API_KEY")
+        if url and not key:
+            raise ConfigError("SNAPSHOT_URL is set but SNAPSHOT_API_KEY is not")
+        if key and not url:
+            raise ConfigError("SNAPSHOT_API_KEY is set but SNAPSHOT_URL is not")
+        if url:
+            snapshot = Snapshot(url=url, api_key=key, poll_s=float(get("SNAPSHOT_POLL_S", "60")))
         symbols = tuple(s.strip() for s in get("MD_SYMBOLS").split(",") if s.strip())
         return cls(
             session=session,
@@ -57,6 +78,7 @@ class Settings:
             symbols=symbols,
             list_refresh_s=float(get("MD_LIST_REFRESH_S", "300")),
             keep_unsettled_s=float(get("MD_KEEP_UNSETTLED_S", "259200")),
+            snapshot=snapshot,
             redis_url=get("REDIS_URL", "redis://127.0.0.1:6379/0"),
             log_level=get("LOG_LEVEL", "INFO").upper(),
         )

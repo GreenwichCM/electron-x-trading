@@ -8,6 +8,9 @@ minutes (request_list) and only new contracts are subscribed. A contract that dr
 subscribed until its settlement price has arrived (PJM settles the next day), `keep_unsettled_s` has
 passed, or the exchange rejects the subscription; then it is retired: unsubscribed, forgotten here, and
 its Redis keys left to expire.
+
+The Snapshot API (snapshot.py), when configured, adds the exchange's marks (the day-ahead price) to each
+book, and its settlement prices stand in until FIX market data sends one.
 """
 
 from __future__ import annotations
@@ -15,10 +18,11 @@ from __future__ import annotations
 import itertools
 import logging
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from trading_core import Symbol
 from trading_fix import FixMessage, FixSession
 
 from .book import BID, NEW, OFFER, OrderBook
@@ -32,6 +36,7 @@ INDICATIVE = {"3", "5"}  # OpenCloseSettlFlag(286): expected entry, theoretical 
 AGGRESSOR = {"1": "BUY", "2": "SELL"}
 DEPTH_LEVELS = 10
 KEEP_UNSETTLED_S = 3 * 24 * 3600
+SAME_PRICE = 0.01  # FIX and the Snapshot API may round a settlement price differently
 
 
 def _px(entry: dict[int, str]) -> float | None:
@@ -73,12 +78,14 @@ class MarketDataApp:
         self.instruments: dict[str, Instrument] = {}
         self.last_trades: dict[str, dict[str, Any]] = {}
         self.settlements: dict[str, dict[str, Any]] = {}
+        self.snapshot_marks: dict[str, dict[str, Any]] = {}  # symbol -> the Snapshot API's marks
         self.subscribed: dict[str, str] = {}  # symbol -> MDReqID, on this connection
         self.delisted: dict[str, float] = {}  # symbol -> when it left the exchange's list
         self._requests: dict[str, str] = {}  # MDReqID -> symbol
         self._listing: list[Instrument] = []
         self._list_req = ""
         self._ids = itertools.count(1)
+        self._disagree: set[str] = set()  # symbols whose two settlement prices differ, already reported
 
     # ---- SessionApp ------------------------------------------------------------------------
 
@@ -110,6 +117,52 @@ class MarketDataApp:
         self._list_req = f"SEC-{next(self._ids)}"
         self._listing = []
         session.send("x", [(320, self._list_req), (559, "4")])  # 559=4: all securities
+
+    # ---- Snapshot API ----------------------------------------------------------------------
+
+    def markets(self) -> list[str]:
+        """The ISOs of the contracts followed, which is what the Snapshot API is asked about."""
+        found = set()
+        for symbol in self.books:
+            try:
+                found.add(Symbol.parse(symbol).market.value)
+            except ValueError:
+                continue
+        return sorted(found)
+
+    def on_marks(self, marks: Mapping[str, dict[str, Any]]) -> None:
+        """The exchange's marks per contract, e.g. {"dam": {"price": 27.84, "time": ...}}."""
+        for symbol, kinds in marks.items():
+            book = self.books.get(symbol)
+            if book is not None and self.snapshot_marks.get(symbol) != kinds:
+                self.snapshot_marks[symbol] = kinds
+                self._publish(book)
+
+    def on_settlements(self, settlements: Mapping[str, dict[str, Any]]) -> None:
+        """Settlement prices from the Snapshot API: used until FIX market data sends a final one."""
+        for symbol, new in settlements.items():
+            book = self.books.get(symbol)
+            if book is None:
+                continue
+            current = self.settlements.get(symbol)
+            if current is not None and current["final"]:
+                self._check_same(symbol, current, new["price"])
+                continue
+            self.settlements[symbol] = {
+                "price": new["price"],
+                "final": True,
+                "flag": "",
+                "source": "snapshot",
+                "time": new["time"] or _now(),
+            }
+            log.info("%s settlement %s (Snapshot API)", symbol, new["price"])
+            self._publish(book)
+
+    def _check_same(self, symbol: str, current: dict[str, Any], other: float) -> None:
+        if abs(current["price"] - other) > SAME_PRICE and symbol not in self._disagree:
+            self._disagree.add(symbol)
+            price, source = current["price"], current["source"]
+            log.warning("%s settlement differs: %s from %s, %s from the other source", symbol, price, source, other)
 
     # ---- handlers --------------------------------------------------------------------------
 
@@ -172,8 +225,10 @@ class MarketDataApp:
         req_id = self.subscribed.pop(symbol, None)
         if req_id is not None:
             session.send("V", [(262, req_id), (263, "2"), (264, "0"), (146, "1"), (55, symbol)])  # unsubscribe
-        for table in (self.books, self.instruments, self.last_trades, self.settlements, self.delisted):
+        tables = (self.books, self.instruments, self.last_trades, self.settlements, self.snapshot_marks, self.delisted)
+        for table in tables:
             table.pop(symbol, None)
+        self._disagree.discard(symbol)
         self.publisher.retire(symbol)
         log.info("%s retired (%s)", symbol, why)
 
@@ -231,9 +286,18 @@ class MarketDataApp:
         flag = entry.get(286, "")
         final = flag not in INDICATIVE
         previous = self.settlements.get(symbol)
-        if previous is not None and (previous["price"], previous["final"]) == (price, final):
-            return  # the same price again (a new snapshot): keep when it was first published
-        self.settlements[symbol] = {"price": price, "final": final, "flag": flag, "time": _entry_time(entry)}
+        if previous is not None and previous["final"]:
+            if not final or abs(previous["price"] - price) <= SAME_PRICE:
+                return  # the same price again (a new snapshot, or the Snapshot API had it first): keep its time
+            if previous["source"] == "snapshot":
+                self._check_same(symbol, previous, price)
+        self.settlements[symbol] = {
+            "price": price,
+            "final": final,
+            "flag": flag,
+            "source": "fix",
+            "time": _entry_time(entry),
+        }
         log.info("%s settlement %s (%s)", symbol, price, "final" if final else "indicative")
 
     def _track_state(self, symbol: str, entry: dict[int, str]) -> None:
@@ -261,7 +325,8 @@ class MarketDataApp:
             "asks": asks,
             "last_trade": self.last_trades.get(book.symbol),
             "state": inst.state if inst else "",
-            "settlement": self.settlements.get(book.symbol),  # {price, final, flag, time} or None
+            "settlement": self.settlements.get(book.symbol),  # {price, final, flag, source, time} or None
+            "marks": self.snapshot_marks.get(book.symbol),  # the exchange's, e.g. {"dam": {price, time}}, or None
             "time": _now(),
         }
 

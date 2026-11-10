@@ -13,6 +13,7 @@ from trading_fix import FixSession, SeqStore, build_ssl_context
 from .app import MarketDataApp
 from .publisher import RedisPublisher
 from .settings import ConfigError, Settings
+from .snapshot import SnapshotClient, poll_snapshots
 
 log = logging.getLogger("md")
 
@@ -46,7 +47,11 @@ async def main() -> None:
 
     publisher_task = asyncio.create_task(publisher.run(), name="publisher")
     session_task = asyncio.create_task(session.run(), name="md-session")
-    refresh_task = asyncio.create_task(refresh_listing(session, app, settings.list_refresh_s), name="listing")
+    helpers = [asyncio.create_task(refresh_listing(session, app, settings.list_refresh_s), name="listing")]
+    if settings.snapshot is not None:
+        log.info("Snapshot API %s, every %.0fs", settings.snapshot.url, settings.snapshot.poll_s)
+        client = SnapshotClient(settings.snapshot.url, settings.snapshot.api_key)
+        helpers.append(asyncio.create_task(poll_snapshots(client, app, settings.snapshot.poll_s), name="snapshot"))
     stop_task = asyncio.create_task(stop.wait(), name="stop")
     done, _ = await asyncio.wait({publisher_task, session_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in done - {stop_task}:
@@ -54,7 +59,8 @@ async def main() -> None:
             log.error("%s failed", task.get_name(), exc_info=task.exception())
 
     log.info("stopping")
-    refresh_task.cancel()
+    for task in helpers:
+        task.cancel()
     await session.stop()
     await session_task
     await publisher.close()
