@@ -22,6 +22,7 @@ from .auth import Authenticator, DevAuthenticator, User
 from .hub import ClientFeed, MarketDataHub
 from .order_hub import OrderHub
 from .orderentry_client import OrderEntryClient, OrderEntryError, OrderEntryUnavailable
+from .rules_routes import add_rule_routes
 from .settings import ConfigError, Settings
 
 log = logging.getLogger("api")
@@ -263,6 +264,8 @@ def create_app(
         await app.state.redis.xadd(ALERTS_STREAM, {"data": json.dumps(alert)}, maxlen=10_000)
         log.warning("%s %s by %s: %s", trader, "blocked" if body.blocked else "unblocked", user.id, body.reason)
         return {"trader": trader, "blocked": body.blocked}
+
+    add_rule_routes(app, settings.db, current_user, require)  # trading rules and their changes
 
     # ---- WebSockets ------------------------------------------------------------------------
 

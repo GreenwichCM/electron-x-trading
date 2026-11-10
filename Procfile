@@ -7,5 +7,5 @@ orderentry: uv run --env-file services/db.env --env-file services/orderentry/.en
 dropcopy: uv run --env-file services/dropcopy/.env python -m trading_dropcopy
 riskmonitor: uv run --env-file services/db.env --env-file services/riskmonitor/.env python -m trading_riskmonitor
 recorder: uv run --env-file services/db.env --env-file services/recorder/.env python -m trading_recorder
-api: uv run --env-file services/api/.env python -m trading_api
+api: uv run --env-file services/db.env --env-file services/api/.env python -m trading_api
 web: npm --prefix web run dev

@@ -6,6 +6,7 @@ import Login from "./Login";
 import OrderTicket, { type TicketPreset } from "./OrderTicket";
 import Positions from "./Positions";
 import Risk from "./Risk";
+import Rules from "./Rules";
 import { type Book, useMarketData } from "./useMarketData";
 import { useOrders } from "./useOrders";
 
@@ -116,6 +117,7 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
         <Risk user={user} />
       )}
       {user.permissions.includes("risk.view.all") && <Positions />}
+      {(user.permissions.includes("risk.view.all") || user.permissions.includes("orders.trade")) && <Rules user={user} />}
       <section className="permissions">
         <h2>Your permissions</h2>
         <div className="chips">

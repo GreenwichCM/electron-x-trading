@@ -62,6 +62,7 @@ DEV_USERS: dict[str, User] = {
     "bob": User("bob", "Bob (risk)", ("risk",)),
     "carol": User("carol", "Carol (management)", ("management",)),
     "dave": User("dave", "Dave (trader)", ("trader",)),
+    "erin": User("erin", "Erin (risk)", ("risk",)),  # a second risk user, to approve bob's changes
 }
 
 

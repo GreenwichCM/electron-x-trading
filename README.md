@@ -38,7 +38,8 @@ Only one copy of orderentry and of dropcopy may run at a time; a second one refu
 
     uv run honcho start
 
-Then open http://localhost:5173 and sign in as a test user. Ctrl-C stops all services.
+Then open http://localhost:5173 and sign in as a test user: alice and dave (traders), bob and erin
+(risk), carol (management). Ctrl-C stops all services.
 To run only some: `uv run honcho start sim marketdata`.
 
 ## Restarts
@@ -81,7 +82,16 @@ Entitlements and limits are keyed by trader, market and product, where `'*'` mea
 limit the most specific row wins, and the `('*', '*', '*')` row is the desk default. The rules fail
 closed: anyone not in `traders`, a contract no entitlement covers, or a limit no row sets means the
 order is rejected. If SQL Server is unreachable the last rules loaded stay in force. Cancels are never
-blocked. Examples, in SSMS:
+blocked.
+
+Change them on the Trading rules page: a risk user proposes a change with a reason, and a second risk
+user approves it (never the same person). Approving applies it, and `electronx.rule_changes` keeps
+every change with the rule before and after, who asked, who decided and when. A proposal whose rule
+changed in the meantime becomes `stale` instead of overwriting the newer rule. Management sees the
+rules and the history; each trader sees the rules that apply to them.
+
+The same tables can be edited directly in SSMS (not audited; in production, only the app's login
+should be able to write them). Examples:
 
     -- let alice trade PJM too
     INSERT electronx.entitlements (trader_id, market, product) VALUES (N'alice', 'PJM', '*');

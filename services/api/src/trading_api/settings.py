@@ -6,6 +6,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from trading_db import DbSettings
+
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -23,6 +25,7 @@ class Settings:
     dev_secret: str = ""
     oe_url: str = "http://127.0.0.1:8100"
     oe_token: str = ""
+    db: DbSettings | None = None  # services/db.env; without it the trading rules pages answer 503
 
     def __post_init__(self) -> None:
         if self.dev_login and self.host not in LOOPBACK:
@@ -44,4 +47,5 @@ class Settings:
             dev_secret=get("API_DEV_SECRET", ""),
             oe_url=get("OE_URL", cls.oe_url),
             oe_token=get("OE_INTERNAL_TOKEN", ""),
+            db=DbSettings.from_env(env) if env.get("DB_PASSWORD", "").strip() else None,
         )

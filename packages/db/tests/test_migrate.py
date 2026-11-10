@@ -37,7 +37,7 @@ def test_migrate_creates_the_database_and_runs_each_migration_once(sql_server):
     applied, pending = status(sql_server)
     assert pending == [] and len(applied) == LATEST
     tables = {"orders", "order_events", "fills", "alerts", "stream_offsets", "schema_migrations"}
-    tables |= {"traders", "entitlements", "limits"}
+    tables |= {"traders", "entitlements", "limits", "rule_changes"}
     assert objects(sql_server, "electronx") == tables
     assert objects(sql_server, "dbo") == set()
 
