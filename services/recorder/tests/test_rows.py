@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from trading_recorder import alert_row, fill_row, order_row, parse_time
-from trading_recorder.rows import report_row
+from trading_recorder.rows import bust_row, report_row
 
 
 def test_times_become_naive_utc():
@@ -110,3 +110,19 @@ def test_an_exchange_report_as_received():
     row = report_row("1-0", report)
     assert (row["exec_type"], row["cum_qty"], row["last_px"], row["raw"]) == ("F", 2, 45.25, "35=8|17=E1|...")
     assert row["exchange_time"] == datetime(2026, 11, 11, 2, 0, 49, 47894) and row["orig_cl_ord_id"] is None
+
+
+def test_a_trade_bust():
+    bust = {"exec_id": "B1", "exec_ref_id": "E1", "bust": True, "time": "20261111-03:00:00.5", "reason": "x" * 500}
+    row = bust_row("1-0", bust)
+    assert row["exec_ref_id"] == "E1" and row["bust_exec_id"] == "B1" and len(row["bust_reason"]) == 400
+    assert row["busted_at"] == datetime(2026, 11, 11, 3, 0, 0, 500000)
+    report = {"exec_id": "B1", "exec_type": "H", "exec_ref_id": "E1", "symbol": "S", "raw": "8=FIXT.1.1|..."}
+    assert report_row("2-0", report)["exec_ref_id"] == "E1"
+    event = order_row("3-0", {**order_update(), "event": "trade_bust", "exec_ref_id": "E1", "busted_qty": 1})
+    assert event["exec_ref_id"] == "E1" and event["busted_qty"] == 1
+
+
+def order_update():
+    order = {"cl_ord_id": "A", "trader": "alice", "symbol": "S", "side": "BUY", "qty": 1, "price": 45.0}
+    return {**order, "status": "filled"}

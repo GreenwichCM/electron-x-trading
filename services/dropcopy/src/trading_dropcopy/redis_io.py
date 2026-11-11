@@ -1,7 +1,8 @@
 """Redis side of dropcopy: publish fills and positions, read orderentry's orders, trip the kill switch.
 
 Redis layout:
-  * XADD fills            every fill from the drop copy, with the trader's ElectronX id (`user`)
+  * XADD fills            every fill from the drop copy, with the trader's ElectronX id (`user`); a trade
+                          bust too, with `bust` true and `exec_ref_id` the fill it cancels
   * XADD screen_orders    every update to an order entered on the ElectronX screen (the recorder keeps them)
   * XADD exchange_reports every ExecutionReport the drop copy receives, ours and the screen's, as received
   * SET  dc:positions     {"positions": {symbol: lots}, "screen": {symbol: lots},

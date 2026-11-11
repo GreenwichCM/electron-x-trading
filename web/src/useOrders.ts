@@ -22,6 +22,7 @@ export type Order = {
   status: OrderStatus;
   order_id: string;
   cum_qty: number;
+  busted_qty?: number; // lots of its fills the exchange cancelled afterwards (trade busts)
   avg_px: number;
   leaves: number;
   text: string;

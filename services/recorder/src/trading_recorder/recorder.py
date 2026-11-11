@@ -22,7 +22,7 @@ from redis.exceptions import RedisError
 from trading_db import LATEST, Connection, DbError, schema_version
 
 from . import store
-from .rows import alert_row, decode_entry, fill_row, order_row, report_row
+from .rows import alert_row, bust_row, decode_entry, fill_row, order_row, report_row
 
 log = logging.getLogger("recorder")
 
@@ -135,7 +135,7 @@ class Recorder:
             if stream in ("orders", "screen_orders"):
                 row = order_row(entry_id, data)
             elif stream == "fills":
-                row = fill_row(entry_id, data)
+                row = bust_row(entry_id, data) if data.get("bust") else fill_row(entry_id, data)
             elif stream == "exchange_reports":
                 row = report_row(entry_id, data)
             else:
@@ -145,6 +145,9 @@ class Recorder:
             return
         if stream in ("orders", "screen_orders"):
             store.write_order(self.conn, row)
+        elif stream == "fills" and data.get("bust"):
+            if not store.write_bust(self.conn, row):
+                log.warning("trade bust %s: fill %s is not recorded here", entry_id, row["exec_ref_id"])
         elif stream == "fills":
             store.write_fill(self.conn, row)
         elif stream == "exchange_reports":

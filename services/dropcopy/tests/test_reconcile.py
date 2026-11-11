@@ -71,3 +71,11 @@ def test_orders_orderentry_never_sent_came_from_the_screen_and_are_never_a_break
     assert r.check(split.ours) is None
     clock.now = 30
     assert r.check(r.split([ours, also_ours, screen, just_seen]).ours) is None
+
+
+def test_a_bust_takes_back_what_orderentry_filled():
+    r = Reconciler(clock=Clock())
+    r.on_order({**order("A", "BUY", 2), "version": 3})
+    r.on_order({**order("A", "BUY", 2), "version": 4, "busted_qty": 1})
+    r.on_order({**order("A", "BUY", 2), "version": 3})  # an older update read late changes nothing
+    assert r.orderentry_positions() == {X: 1}

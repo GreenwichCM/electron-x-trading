@@ -19,6 +19,7 @@ from .connection import Connection
 from .migrate import SCHEMA
 
 SETTLE_S = 60
+EXCHANGE_EVENTS = "('exchange_report', 'trade_bust')"  # order events that are the exchange's reports
 
 OURS = f"""
 EXISTS (SELECT 1 FROM {SCHEMA}.orders AS o WHERE o.source = 'app'
@@ -39,7 +40,7 @@ ORDER BY r.received_at
 ORDERENTRY_ONLY = f"""
 SELECT TOP (%(limit)s) e.cl_ord_id, e.order_id, e.exec_id, e.exec_type, e.status, e.cum_qty, e.event_at
 FROM {SCHEMA}.order_events AS e
-WHERE e.source = 'app' AND e.event = 'exchange_report' AND e.event_at >= %(since)s AND e.event_at < %(until)s
+WHERE e.source = 'app' AND e.event IN {EXCHANGE_EVENTS} AND e.event_at >= %(since)s AND e.event_at < %(until)s
   AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.exchange_reports AS r WHERE {SAME_REPORT})
 ORDER BY e.event_at
 """
@@ -49,7 +50,7 @@ SELECT
   (SELECT COUNT(*) FROM {SCHEMA}.exchange_reports AS r
    WHERE r.received_at >= %(since)s AND r.received_at < %(until)s AND {OURS}),
   (SELECT COUNT(*) FROM {SCHEMA}.order_events AS e
-   WHERE e.source = 'app' AND e.event = 'exchange_report' AND e.event_at >= %(since)s AND e.event_at < %(until)s)
+   WHERE e.source = 'app' AND e.event IN {EXCHANGE_EVENTS} AND e.event_at >= %(since)s AND e.event_at < %(until)s)
 """
 
 

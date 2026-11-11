@@ -423,3 +423,28 @@ th.sortable:hover {
   margin: 0;
   font-variant-numeric: tabular-nums;
 }
+.busted {
+  color: var(--ask);
+  font-size: 12px;
+}
+
+/* ---- ElectronX users nobody here has ---- */
+.unknown-users {
+  border: 1px solid #e3b341;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.unknown-users h2 {
+  color: #e3b341;
+}
+.unknown-users p {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.unknown-users ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}

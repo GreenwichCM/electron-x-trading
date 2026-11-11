@@ -7,6 +7,9 @@ Orders entered on the ElectronX screen come only from the drop copy. They carry 
 (electronx.traders.exchange_trader_id). Their times are FIX timestamps; the hub gives them ISO 8601 times
 like orderentry's, so the blotter can sort and show both alike. Our own orders are listed by orderentry;
 the hub keeps every order from the screen it has seen (the stream from its start).
+
+An ElectronX id no trader here has (unknown_users) is logged once and listed on the dashboard for risk:
+those orders have no trader until someone is given that id on the Trading rules page.
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ class OrderHub:
         self.ready = asyncio.Event()  # set once reading has started
         self.rules: TradingRules | None = None
         self._screen: dict[str, Order] = {}  # cl_ord_id -> the latest update from dropcopy, as published
+        self._warned: set[str] = set()  # ElectronX ids logged as nobody's
 
     def connect(self, wants: Callable[[Order], bool]) -> ClientFeed:
         feed = ClientFeed()
@@ -84,12 +88,36 @@ class OrderHub:
         rows = [self.screen_row(raw) for raw in self._screen.values()]
         return [r for r in rows if trader is None or r["trader"] == trader]
 
+    def unknown_users(self) -> list[dict[str, Any]]:
+        """ElectronX users with orders from the screen whose id no trader here has: [{exchange_user,
+        orders, last}], most recent first. Empty until the rules are loaded, so that nobody is reported
+        just because the rules are not known yet."""
+        if self.rules is None:
+            return []
+        found: dict[str, dict[str, Any]] = {}
+        for raw in self._screen.values():
+            user = raw.get("exchange_user") or ""
+            if self.rules.trader_for(user):
+                continue
+            entry = found.setdefault(user, {"exchange_user": user, "orders": 0, "last": ""})
+            entry["orders"] += 1
+            entry["last"] = max(entry["last"], iso_time(raw.get("updated") or raw.get("created")))
+        return sorted(found.values(), key=lambda e: e["last"], reverse=True)
+
     def _keep(self, order: Order) -> bool:
         """Keep an update from the screen unless a newer one of the same order is already here."""
         held = self._screen.get(order["cl_ord_id"])
         if held is not None and int(held.get("version", 0)) > int(order.get("version", 0)):
             return False
         self._screen[order["cl_ord_id"]] = order
+        user = order.get("exchange_user") or ""
+        if self.rules is not None and user not in self._warned and not self.rules.trader_for(user):
+            self._warned.add(user)
+            log.warning(
+                "orders from the ElectronX screen by %s, an ElectronX id no trader here has: they have no "
+                "trader until someone is given it on the Trading rules page",
+                user or "(no TargetSubID)",
+            )
         return True
 
     async def run(self) -> None:

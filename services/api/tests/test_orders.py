@@ -164,3 +164,24 @@ def test_orders_from_the_electronx_screen_are_in_the_blotter_for_their_trader():
         assert [(o["cl_ord_id"], o["status"]) for o in mine] == [("UI-2", "canceled"), ("A0", "filled")]
         everyone = {o["cl_ord_id"]: o for o in client.get("/api/orders", headers=bob).json()}
         assert set(everyone) == {"A0", "UI-1", "UI-2"} and everyone["UI-1"]["trader"] == ""
+
+
+def test_risk_is_told_about_electronx_users_no_trader_has():
+    redis, app = make_app(FakeOrderEntry())
+    with TestClient(app) as client:
+        _, alice = headers(client, "alice")
+        _, bob = headers(client, "bob")
+        client.portal.call(app.state.orders.ready.wait)
+        assert client.get("/api/exchange-users/unknown", headers=bob).json() == []  # rules not loaded yet
+        app.state.orders.set_rules(
+            TradingRules(traders={"alice": Trader("alice", "a@x.com")}, entitlements=frozenset(), limits={})
+        )
+        for cl, user in (("UI-1", "z@x.com"), ("UI-2", "A@x.com"), ("UI-3", "z@x.com")):
+            client.portal.call(redis.xadd, "screen_orders", {"data": json.dumps(screen_order(cl, user))})
+        for _ in range(100):
+            unknown = client.get("/api/exchange-users/unknown", headers=bob).json()
+            if unknown and unknown[0]["orders"] == 2:
+                break
+        assert [(u["exchange_user"], u["orders"]) for u in unknown] == [("z@x.com", 2)]  # A@x.com is alice
+        assert unknown[0]["last"] == "2026-11-10T14:03:56.123+00:00"
+        assert client.get("/api/exchange-users/unknown", headers=alice).status_code == 403

@@ -275,3 +275,21 @@ def test_reconcile_finds_the_reports_only_one_session_saw(sql_server):
     assert [row[2] for row in result.drop_copy_only] == ["X5"]
     assert [row[2] for row in result.orderentry_only] == ["X4"]
     assert not result.ok
+
+
+def test_a_trade_bust_marks_its_fill(sql_server):
+    migrate(sql_server)
+    r = FakeRedis()
+    add(r, "fills", fill("E1", "A", 2))
+    bust = {"bust": True, "exec_ref_id": "E1", "reason": "Erroneous trade", "time": "20261111-03:00:00.123456789"}
+    add(r, "fills", {**fill("B1", "A", 2), **bust})
+    event = {"event": "trade_bust", "by": "exchange", "exec_id": "B1", "exec_type": "H", "exec_ref_id": "E1"}
+    add(r, "orders", {**order("A", 4, status="partially_filled", cum_qty=2), **event, "busted_qty": 2})
+    assert drain(make_recorder(r, sql_server)) == 3
+    assert query(sql_server, "SELECT exec_id, busted_at, bust_exec_id, bust_reason FROM electronx.fills") == [
+        ("E1", datetime(2026, 11, 11, 3, 0, 0, 123456), "B1", "Erroneous trade")
+    ]
+    assert query(sql_server, "SELECT event, exec_ref_id, busted_qty FROM electronx.order_events") == [
+        ("trade_bust", "E1", 2)
+    ]
+    assert query(sql_server, "SELECT busted_qty, last_event FROM electronx.orders") == [(2, "trade_bust")]

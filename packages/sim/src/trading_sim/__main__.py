@@ -16,6 +16,9 @@ simulator's own certificate and key, and the CA that client certificates must be
 SIM_SCREEN_USERS (comma-separated ElectronX trader ids) has those traders place a small order on the
 "ElectronX screen" every SIM_SCREEN_EVERY_S (60) seconds: no FIX session sends it, only the drop copy
 reports it, as for orders traders enter on the exchange's own screen.
+
+Writing `last` (or a TrdMatchID) to the file `bust` in SIM_STATE_DIR busts that trade, as ElectronX's
+operations team can: `echo last > var/sim/bust`.
 """
 
 from __future__ import annotations
@@ -87,6 +90,22 @@ async def screen_traders(oe: SimOrderEntry, users: list[str], every_s: float, rn
         )
 
 
+async def bust_on_request(oe: SimOrderEntry, path: Path, every_s: float = 1.0) -> None:
+    """Bust the trade named in `path` (`last` for the latest), then remove the file."""
+    while True:
+        await asyncio.sleep(every_s)
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+        path.unlink(missing_ok=True)
+        sent = oe.bust("" if text in ("", "last") else text)
+        if sent:
+            log.warning("busted trade %s: %d report(s) sent", text or "last", sent)
+        else:
+            log.warning("no trade %s to bust (only trades since the simulator started can be)", text or "last")
+
+
 async def main() -> None:
     log_format = "%(asctime)s %(levelname)s %(name)s %(message)s"
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format=log_format)
@@ -130,7 +149,7 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    tasks = [asyncio.create_task(md.run(interval))]
+    tasks = [asyncio.create_task(md.run(interval)), asyncio.create_task(bust_on_request(oe, state_dir / "bust"))]
     if full:
         tasks.append(asyncio.create_task(keep_rolling(md, rng)))
     users = [u.strip() for u in os.environ.get("SIM_SCREEN_USERS", "").split(",") if u.strip()]

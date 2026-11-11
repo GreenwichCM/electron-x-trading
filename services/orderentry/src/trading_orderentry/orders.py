@@ -2,8 +2,9 @@
 
 Every change is published as the order's new state plus the event that caused it (OrderEntryApp):
   event               new_order, refused (by our checks, never sent), cancel_request, cancel_refused (by
-                      us: not your order, already closed, ...), exchange_report, cancel_reject,
-                      business_reject
+                      us: not your order, already closed, ...), exchange_report, trade_bust (the
+                      exchange cancelled one of its fills), cancel_reject, business_reject,
+                      session_reject (the exchange's session refused the message as malformed)
   by                  who or what caused it: the trader's user id, the risk user who tripped the kill switch
                       or blocked the trader (or riskmonitor, dropcopy), orderentry itself, or "exchange"
   reason, event_time  why (a reject or refusal, the kill switch's reason, ...), and when it happened here
@@ -73,6 +74,8 @@ class Order:
     capacity: str = ""  # CustOrderCapacity(582)
     ord_type: str = "LIMIT"  # OrdType(40): limit orders only
     manual: bool = True  # ManualOrderIndicator(1028): entered by a person
+    busted_qty: int = 0  # lots of its fills the exchange has since cancelled (trade busts)
+    busted: list[str] = field(default_factory=list)  # the ExecIDs of those fills
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Order:
@@ -85,6 +88,11 @@ class Order:
     @property
     def live(self) -> bool:
         return self.status in LIVE
+
+    @property
+    def net_filled(self) -> int:
+        """What counts towards the position: filled, less what the exchange has busted."""
+        return self.cum_qty - self.busted_qty
 
     @property
     def leaves(self) -> int:

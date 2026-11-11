@@ -6,6 +6,9 @@ is still unknown after SCREEN_AFTER_S, the order was entered on the ElectronX sc
 the trader whose ElectronX trader id (electronx.traders.exchange_trader_id) is the fill's `user`, the
 TargetSubID(57) on the drop copy. A fill whose user matches no trader stays unattributed.
 
+A trade bust (a fill with `bust` set) undoes its fill: it is applied as the opposite trade at the
+same price, which takes the position back and leaves the P&L as if the trade had never happened.
+
 P&L is reported for today's trading day (see day.py) and since start (every fill riskmonitor has
 seen). Today's P&L values what was held when the day began at the start-of-day mark, so
     today = (position now x mark now) - (position at the start x start-of-day mark) - cost of today's fills
@@ -187,6 +190,8 @@ class RiskEngine:
     def _apply(self, trader: str, fill: Mapping[str, Any], screen: bool = False) -> None:
         self._roll()
         side, qty, price = fill["side"], int(fill["qty"]), float(fill["price"])
+        if fill.get("bust"):  # the exchange cancelled this trade: undo it, at its own price
+            side = "SELL" if side == "BUY" else "BUY"
         holding = self.holdings.setdefault((trader, fill["symbol"]), Holding())
         if screen:
             holding.screen += _signed(side, qty)

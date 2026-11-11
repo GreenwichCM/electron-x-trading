@@ -63,3 +63,8 @@ def test_trader_for_an_electronx_id():
     assert rules.trader_for("firms/h/users/alice") == "alice"
     assert rules.trader_for("shared") is None  # two traders have it: it cannot say who traded
     assert rules.trader_for("nobody") is None and rules.trader_for("") is None and rules.trader_for(None) is None
+
+
+def test_an_electronx_id_matches_whatever_its_case():
+    rules = TradingRules(traders={"jane": Trader("jane", "Jane@x.com")}, entitlements=frozenset(), limits={})
+    assert rules.trader_for("jane@X.COM") == "jane" and rules.trader_for("Jane@x.com") == "jane"

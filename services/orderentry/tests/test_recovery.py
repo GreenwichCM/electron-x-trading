@@ -251,3 +251,16 @@ def test_orders_from_an_earlier_week_are_cancelled(tmp_path):
         await ex.gw.stop()
 
     asyncio.run(asyncio.wait_for(scenario(), 20))
+
+
+def test_a_bust_replayed_from_the_stream_moves_the_position_back():
+    rec = Recovered()
+    filled = Order("C1", "alice", SYMBOL, "BUY", 2, 45.0, "DAY", status=Status.FILLED, cum_qty=2, version=2)
+    apply(rec, filled.to_dict())
+    busted = Order(
+        "C1", "alice", SYMBOL, "BUY", 2, 45.0, "DAY", status=Status.FILLED, cum_qty=2, version=3, busted_qty=1
+    )
+    busted.busted = ["E1"]
+    apply(rec, busted.to_dict())
+    apply(rec, filled.to_dict())  # older: ignored
+    assert rec.positions[("alice", SYMBOL)] == 1 and rec.orders["C1"].busted == ["E1"]

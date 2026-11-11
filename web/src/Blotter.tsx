@@ -57,7 +57,14 @@ export default function Blotter({ orders, user }: { orders: Order[]; user: User 
               <td className={o.side === "BUY" ? "buy" : "sell"}>{o.side}</td>
               <td className="num">{o.qty}</td>
               <td className="num">{o.price.toFixed(2)}</td>
-              <td className="num">{o.cum_qty}</td>
+              <td className="num">
+                {o.cum_qty}
+                {o.busted_qty ? (
+                  <span className="busted" title="Fills the exchange cancelled afterwards (trade bust)">
+                    {` (${o.busted_qty} busted)`}
+                  </span>
+                ) : null}
+              </td>
               <td className="num">{o.cum_qty ? o.avg_px.toFixed(2) : ""}</td>
               <td>
                 <span className={`pill ${o.status}`}>{label(o.status)}</span>

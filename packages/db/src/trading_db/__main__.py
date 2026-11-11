@@ -4,6 +4,7 @@ uv run --env-file services/db.env python -m trading_db migrate    # create or up
 uv run --env-file services/db.env python -m trading_db status     # which migrations are applied
 uv run --env-file services/db.env python -m trading_db seed-dev   # starting rules for the test users
 uv run --env-file services/db.env python -m trading_db reconcile  # orderentry's reports against the drop copy's
+uv run --env-file services/db.env python -m trading_db check-traders [--fill-in]  # screen orders with no trader
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import sys
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
+from .attribution import fill_in_traders, traders_without_id, unknown_users
 from .connection import DbError, connect
 from .migrate import MigrationError, migrate, status
 from .reconcile import SETTLE_S, reconcile
@@ -23,8 +25,11 @@ from .settings import ConfigError, DbSettings
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m trading_db")
-    parser.add_argument("command", choices=["migrate", "status", "seed-dev", "reconcile"])
+    parser.add_argument("command", choices=["migrate", "status", "seed-dev", "reconcile", "check-traders"])
     parser.add_argument("--hours", type=float, default=24, help="reconcile: how far back to look")
+    parser.add_argument(
+        "--fill-in", action="store_true", help="check-traders: give blank rows to whoever has their id now"
+    )
     args = parser.parse_args()
     logging.basicConfig(level="INFO", format="%(message)s")
     try:
@@ -39,12 +44,43 @@ def main() -> None:
             print(f"pending: {', '.join(pending) or 'none'}")
         elif args.command == "reconcile":
             sys.exit(0 if print_reconciliation(settings, args.hours) else 1)
+        elif args.command == "check-traders":
+            sys.exit(0 if check_traders(settings, args.fill_in) else 1)
         elif seed_dev_rules(settings):
             print(f"{settings!r}: added starting rules for alice (ERCOT) and dave (PJM)")
         else:
             print(f"{settings!r}: electronx.traders already has rows; nothing changed")
     except (ConfigError, MigrationError, *DbError) as exc:  # DbError is a tuple of classes
         sys.exit(f"error: {exc}")
+
+
+def check_traders(settings: DbSettings, fill_in: bool) -> bool:
+    """Orders from the ElectronX screen recorded without a trader, and traders with no ElectronX id.
+    True if every screen order has its trader."""
+    with closing(connect(settings)) as conn:
+        if fill_in:
+            changed = fill_in_traders(conn)
+            conn.commit()
+        unknown = unknown_users(conn)
+        missing = traders_without_id(conn)
+    print(f"{settings!r}")
+    if fill_in:
+        print(f"  filled in the trader on {changed['orders']} orders and {changed['order_events']} order events")
+    if missing:
+        print(f"  active traders with no ElectronX id: {', '.join(missing)}")
+    if not unknown:
+        print("  every order from the ElectronX screen has its trader")
+        return True
+    print("  ElectronX users whose orders from the screen have no trader:")
+    for u in unknown:
+        last = f"{u.last_seen:%Y-%m-%d %H:%M}" if u.last_seen else "?"
+        hint = (
+            f"{u.owner} has this id now: run with --fill-in"
+            if u.owner
+            else "no trader has this id: set it on the Trading rules page"
+        )
+        print(f"    {u.exchange_user or '(none sent)'}  {u.orders} orders, last {last} UTC  {hint}")
+    return False
 
 
 def print_reconciliation(settings: DbSettings, hours: float) -> bool:

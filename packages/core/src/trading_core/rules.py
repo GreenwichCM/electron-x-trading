@@ -111,11 +111,17 @@ class TradingRules:
         return t.exchange_trader_id if t else None
 
     def trader_for(self, exchange_trader_id: str | None) -> str | None:
-        """Our trader with this ElectronX trader id, the TargetSubID(57) on the exchange's reports.
-        None if nobody has it, or more than one trader does (then it cannot say who traded)."""
+        """Our trader with this ElectronX trader id, the TargetSubID(57) on the exchange's reports, in any
+        case (Jane@x.com is jane@x.com, as in SQL Server). None if nobody has it, or more than one trader
+        does (then it cannot say who traded; the database now refuses that)."""
         if not exchange_trader_id:
             return None
-        found = [t.trader_id for t in self.traders.values() if t.exchange_trader_id == exchange_trader_id]
+        wanted = exchange_trader_id.casefold()
+        found = [
+            t.trader_id
+            for t in self.traders.values()
+            if t.exchange_trader_id and t.exchange_trader_id.casefold() == wanted
+        ]
         return found[0] if len(found) == 1 else None
 
     def summary(self) -> str:

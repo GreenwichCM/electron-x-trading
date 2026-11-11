@@ -89,7 +89,18 @@ the trader's ElectronX id (TargetSubID 57), so they are not lost:
 * riskmonitor gives screen fills to the trader whose `exchange_trader_id` in `electronx.traders` is that
   ElectronX id: they count in that trader's P&L and daily loss limit. orderentry counts them against the
   trader's position limit too. Give each trader who uses the screen their own `exchange_trader_id`; fills
-  whose id no trader has (or more than one has) stay unattributed.
+  whose id no trader has stay unattributed.
+* Each ElectronX id belongs to one trader at most: the Trading rules page refuses to give it to a second
+  one, and so does the database. Ids match whatever their case (`Jane@x.com` is `jane@x.com`).
+* The dashboard warns risk about anyone trading on the screen whose ElectronX id no trader has. Their
+  orders are still recorded, with `trader` blank. Approving the id for a trader on the Trading rules
+  page then fills in that trader on those orders as well. After a change made directly in SQL:
+
+      uv run --env-file services/db.env python -m trading_db check-traders --fill-in
+
+  Without `--fill-in` it only lists who is missing (exit code 1 if anyone is), for a daily check.
+* Orders the exchange rejects outright ("Book is CLOSED") never get an OrderID; they are recorded too,
+  by their ClOrdID, with status `rejected`.
 * The recorder keeps screen orders in `electronx.orders` and `electronx.order_events` with
   `source = 'electronx'` and the ElectronX id in `exchange_user`; every fill has `exchange_user` too. Our
   own orders have `source = 'app'`.
@@ -154,16 +165,20 @@ applications. Schema changes are numbered files in `packages/db/src/trading_db/m
 by the `migrate` command above (`status` lists them).
 
     docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -U sa -P "$(grep MSSQL_SA_PASSWORD .env | cut -d= -f2-)" \
-        -d trading -Q "SELECT TOP 10 f.exec_time, o.trader, f.symbol, f.side, f.qty, f.price FROM electronx.fills AS f LEFT JOIN electronx.orders AS o ON o.cl_ord_id = f.cl_ord_id ORDER BY f.exec_time DESC"
+        -d trading -Q "SELECT TOP 10 f.exec_time, o.trader, f.symbol, f.side, f.qty, f.price FROM electronx.fills AS f LEFT JOIN electronx.orders AS o ON o.cl_ord_id = f.cl_ord_id WHERE f.busted_at IS NULL ORDER BY f.exec_time DESC"
 
 Fills come from drop copy and carry the ClOrdID, not the trader; the join with `electronx.orders` adds it.
+A fill the exchange cancels afterwards (a trade bust) stays in the table with `busted_at`, `bust_exec_id`
+and `bust_reason` set: leave those out (`WHERE busted_at IS NULL`) to count the trades that stand.
 
 `electronx.orders` has one row per order, its latest state (what the blotter shows); `electronx.order_events`
 has a row for every change, so an order's whole life can be read back. Each event says:
 
 * what happened (`event`): `new_order`, `refused` (by our checks, never sent), `cancel_request`,
-  `cancel_refused` (not your order, already closed, not connected), `exchange_report`, `cancel_reject`,
-  `business_reject`
+  `cancel_refused` (not your order, already closed, not connected), `exchange_report`, `trade_bust` (the
+  exchange cancelled one of the order's fills afterwards: `exec_ref_id` names it, and `busted_qty` adds
+  them up), `cancel_reject`, `business_reject`, `session_reject` (the exchange's FIX session refused
+  the message as malformed, so it never reached the book)
 * who or what caused it (`by_user`): the trader, the risk user who tripped the kill switch or blocked the
   trader (or riskmonitor, dropcopy), orderentry after a restart, the trader on the ElectronX screen, or
   `exchange`; why (`reason`); and when, here (`event_at`) and at the exchange (`exchange_time`)
@@ -183,6 +198,20 @@ received, with the whole FIX message in `raw`. `reconcile` compares the two, rep
 any report only one side has (it exits with 1 if there is one):
 
     uv run --env-file services/db.env python -m trading_db reconcile --hours 24
+
+### Trade busts
+
+ElectronX can cancel a trade after it happened (a bust): it sends an ExecutionReport with ExecType `H`
+for each side, naming the cancelled fill in ExecRefID. Everything takes the fill back out: drop copy's
+positions, orderentry's per trader (so the position limit frees up), riskmonitor's position and P&L
+(as if the trade had never happened), and the screen's. The order keeps its status and `cum_qty`, as the
+exchange reports them, with `busted_qty` beside them; the blotter shows "(1 busted)". In SQL the fill
+is marked (`busted_at`), the order gets a `trade_bust` event, and the report is in
+`electronx.exchange_reports` with `exec_type` H.
+
+To try it with the simulator, trade something, then bust the latest trade (or name its TrdMatchID):
+
+    echo last > var/sim/bust
 
 To use another SQL Server (for example a shared company database), point `DB_HOST`, `DB_PORT`,
 `DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/db.env` at it and run `migrate`. For a

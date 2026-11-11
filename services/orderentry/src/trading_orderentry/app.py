@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from decimal import Decimal
 
@@ -17,6 +18,8 @@ from .risk import Instrument, RiskLimits, Throttle, check_order
 from .sink import OrderSink
 
 log = logging.getLogger("oe")
+
+SENT_KEPT = 10_000  # orders and cancels remembered by sequence number, for session-level rejects
 
 
 class OrderError(Exception):
@@ -56,6 +59,7 @@ class OrderEntryApp:
         self.screen_by_user: dict[str, dict[str, int]] = {}  # ElectronX user -> symbol -> lots from their screen
         self._cancel_ids: dict[str, str] = {}  # cancel request ClOrdID -> order ClOrdID
         self._before_cancel: dict[str, Status] = {}
+        self._sent: OrderedDict[int, tuple[str, str]] = OrderedDict()  # MsgSeqNum -> (ClOrdID, cancel's or "")
         self.kill_switch = KillSwitchState()
         self.blocks: dict[str, TraderBlock] = {}  # trader -> why they may not trade
         self.changes = 0  # goes up on every order update; the state file is saved when it moves
@@ -214,7 +218,7 @@ class OrderEntryApp:
         self._cancel_ids[cancel_id] = order.cl_ord_id
         self._before_cancel[order.cl_ord_id] = order.status
         assert self.session is not None
-        self.session.send(
+        seq = self.session.send(
             "F",
             [
                 (11, cancel_id),
@@ -227,6 +231,7 @@ class OrderEntryApp:
             ],
             header=[(50, order.exchange_user or self._exchange_trader(order.trader))],
         )
+        self._remember(seq, order.cl_ord_id, cancel_id)
         event = {"event": "cancel_request", "by": by, "reason": reason, "request_id": cancel_id}
         self._update(order, event, status=Status.PENDING_CANCEL)
 
@@ -250,6 +255,8 @@ class OrderEntryApp:
             self._on_execution_report(msg)
         elif mt == "9":
             self._on_cancel_reject(msg)
+        elif mt == "3":
+            self._on_session_reject(msg)
         elif mt == "j":
             order = self.orders.get(msg.get(379, "")) or self.orders.get(self._cancel_ids.get(msg.get(379, ""), ""))
             log.error("business reject of %s: %s", msg.get(379), msg.get(58))
@@ -275,10 +282,17 @@ class OrderEntryApp:
         # after a restart only the second is known.
         order = self.orders.get(self._cancel_ids.get(cl, cl)) or self.orders.get(msg.get(41, ""))
         if order is None:
-            if exec_type == "F":
-                log.error("fill for unknown order %s: not in our positions (dropcopy will show the difference)", cl)
+            if exec_type in ("F", "H"):
+                log.error(
+                    "%s for unknown order %s: not in our positions (dropcopy will show the difference)",
+                    "fill" if exec_type == "F" else "trade bust",
+                    cl,
+                )
             else:
                 log.warning("ExecutionReport for unknown order %s", cl)
+            return
+        if exec_type == "H":
+            self._on_bust(order, msg)
             return
         cum_qty = msg.get_int(14, order.cum_qty)
         status = FROM_ORD_STATUS.get(msg.get(39, ""), order.status)
@@ -304,6 +318,57 @@ class OrderEntryApp:
             avg_px=msg.get_float(6, order.avg_px),
             text=msg.get(58, order.text if exec_type != "F" else ""),
         )
+
+    def _on_bust(self, order: Order, msg: FixMessage) -> None:
+        """The exchange cancelled (busted) one of this order's trades: that fill no longer counts. The
+        report repeats the order as it was at the trade, so only the busted quantity changes."""
+        ref = msg.get(19, "") or msg.get(17, "")  # ExecRefID: the fill it cancels
+        if ref in order.busted:
+            return  # a resent copy
+        qty = msg.get_int(32)
+        order.busted.append(ref)
+        order.busted_qty += qty
+        key = (order.trader, order.symbol)
+        self.positions[key] = self.positions.get(key, 0) - (qty if order.side == "BUY" else -qty)
+        log.warning(
+            "trade bust: fill %s of %s (%s %d %s) cancelled by the exchange: %s",
+            ref,
+            order.cl_ord_id,
+            order.side,
+            qty,
+            order.symbol,
+            msg.get(58, "") or "no reason given",
+        )
+        event = {"event": "trade_bust", "by": "exchange", "reason": msg.get(58, ""), **report_fields(msg)}
+        self._update(order, event)
+
+    def _on_session_reject(self, msg: FixMessage) -> None:
+        """The exchange's session refused one of our messages (Reject [3]), so it never reached the book.
+        The reject names only the message's sequence number (RefSeqNum 45)."""
+        try:
+            cl, request_id = self._sent.pop(int(msg.get(45) or ""))
+        except KeyError, ValueError:
+            return  # not an order or cancel of ours (the session has logged it)
+        order = self.orders.get(cl)
+        if order is None:
+            return
+        reason = f"refused by the exchange's session: {msg.get(58) or 'no reason given'}"
+        if msg.get(371):
+            reason += f" (tag {msg.get(371)})"  # RefTagID: the field it objected to
+        event = {
+            "event": "session_reject",
+            "by": "exchange",
+            "reason": reason,
+            "reject_code": msg.get_int(373) if msg.get(373) else None,  # SessionRejectReason
+            "request_id": request_id,
+        }
+        if not request_id and order.status == Status.PENDING_NEW:
+            self._update(order, event, status=Status.REJECTED, text=reason)
+        elif request_id and order.status == Status.PENDING_CANCEL:
+            previous = self._before_cancel.pop(order.cl_ord_id, Status.NEW)
+            self._update(order, event, status=previous, text=reason)
+        else:
+            self._publish(order, event)  # already answered otherwise: recorded, nothing changes
 
     def _on_cancel_reject(self, msg: FixMessage) -> None:
         order = self.orders.get(msg.get(41, "")) or self.orders.get(self._cancel_ids.get(msg.get(11, ""), ""))
@@ -357,7 +422,7 @@ class OrderEntryApp:
     def _send_new(self, order: Order) -> None:
         assert self.session is not None
         inst = self.instruments[order.symbol]
-        self.session.send(
+        seq = self.session.send(
             "D",
             [
                 (11, order.cl_ord_id),
@@ -374,6 +439,7 @@ class OrderEntryApp:
             ],
             header=[(50, order.exchange_user)],
         )
+        self._remember(seq, order.cl_ord_id)
 
     def _limits_for(self, order: Order) -> tuple[RiskLimits | None, str]:
         """The limits for this order from the trading rules, or None and why it may not be placed."""
@@ -390,6 +456,12 @@ class OrderEntryApp:
 
     def _exchange_trader(self, trader: str) -> str:
         return (self.rules.exchange_trader(trader) if self.rules else None) or self.default_trader
+
+    def _remember(self, seq: int, cl_ord_id: str, request_id: str = "") -> None:
+        """Which order a message was about, by its sequence number, in case the session rejects it."""
+        self._sent[seq] = (cl_ord_id, request_id)
+        while len(self._sent) > SENT_KEPT:
+            self._sent.popitem(last=False)
 
     def _logged_on(self) -> bool:
         return self.session is not None and self.session.logged_on

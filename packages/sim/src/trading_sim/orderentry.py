@@ -12,6 +12,9 @@ Follows the ElectronX rules the OMS depends on:
     so only the drop copy sessions hear about it
   * resting orders survive a restart of the simulator (with a `state_path`), as they would at the
     exchange, until the weekly reset
+  * bust() cancels a trade after the fact, as the exchange's operations team can: an ExecutionReport
+    with ExecType H for each side of ours, repeating the order as it was at the trade, with
+    ExecRefID(19) naming the fill it cancels
 """
 
 from __future__ import annotations
@@ -77,6 +80,8 @@ class SimOrderEntry:
         md.on_expire = self._on_expire
         self.orders: dict[str, ClientOrder] = {}  # OrderID -> order
         self.by_cl_ord_id: dict[tuple[str, str], ClientOrder] = {}  # (SenderCompID, ClOrdID) -> order
+        # TrdMatchID -> the trade reports sent for it (sender, fields), for bust()
+        self.trade_reports: dict[str, list[tuple[str, Fields]]] = {}
         self._load()
 
     # ---- requests --------------------------------------------------------------------------
@@ -154,6 +159,26 @@ class SimOrderEntry:
         self._report(None, order, EXEC_CANCELED)
         self.md.flush()
         self._save()
+
+    def bust(self, trade_id: str = "", reason: str = "Trade busted by ElectronX Operations") -> int:
+        """Cancel a trade (the latest one if no TrdMatchID is given). Returns the number of reports sent:
+        one per side of the trade that was ours or from the screen, none if there is no such trade."""
+        trade_id = trade_id or next(reversed(self.trade_reports), "")
+        sent = self.trade_reports.pop(trade_id, [])
+        for sender, body in sent:
+            fields = dict(body)
+            out: Fields = []
+            for tag, value in body:
+                if tag == 17:
+                    value = self.md.new_id("E")
+                elif tag == 150:
+                    value = "H"
+                elif tag == 60:
+                    value = utc_timestamp()  # when the bust happened; the rest is as at the trade
+                out.append((tag, value))
+            out += [(19, fields[17]), (58, reason)]
+            self._send_report(self.gateway.sessions.get(sender) if sender else None, out)
+        return len(sent)
 
     def _enter(self, session: SimSession | None, order: ClientOrder, price: float, ord_type: str) -> None:
         """Check a new order, then acknowledge it, match it and rest what is left."""
@@ -313,6 +338,11 @@ class SimOrderEntry:
             body += [(880, self.md.last_trade_id), (1057, "Y" if aggressor else "N")]  # TrdMatchID, AggressorIndicator
         if text:
             body.append((58, text))
+        if exec_type == EXEC_TRADE:
+            self.trade_reports.setdefault(self.md.last_trade_id, []).append((order.sender, list(body)))
+        self._send_report(session, body)
+
+    def _send_report(self, session: SimSession | None, body: Fields) -> None:
         if session is not None:
             session.send("8", body)
         for sender in self.drop_copy_senders:

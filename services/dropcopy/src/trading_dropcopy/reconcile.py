@@ -45,15 +45,25 @@ class Reconciler:
         self.grace_s = grace_s
         self.screen_after_s = screen_after_s
         self.clock = clock
-        self._orders: dict[str, tuple[str, str, int]] = {}  # ClOrdID -> (symbol, side, filled qty)
+        # ClOrdID -> (symbol, side, filled qty less busted, version of the update it is from)
+        self._orders: dict[str, tuple[str, str, int, int]] = {}
         self._order_ids: set[str] = set()  # the exchange's OrderIDs of orderentry's orders
         self._since: dict[str, float] = {}  # symbol -> when it first differed
 
     def on_order(self, order: Mapping[str, Any]) -> None:
-        """An update from the orders stream. Filled quantity only grows, so keep the largest seen."""
+        """An update from the orders stream; an older version than the one held changes nothing. What
+        counts is the quantity filled, less any of it the exchange has busted since. Updates without a
+        version (from before step 10) can only add fills, so of those the largest wins."""
         cl = order["cl_ord_id"]
-        previous = self._orders.get(cl, ("", "", 0))[2]
-        self._orders[cl] = (order["symbol"], order["side"], max(previous, int(order.get("cum_qty") or 0)))
+        version = int(order.get("version") or 0)
+        net = int(order.get("cum_qty") or 0) - int(order.get("busted_qty") or 0)
+        previous = self._orders.get(cl)
+        if previous is not None:
+            if version < previous[3]:
+                return
+            if version == previous[3]:
+                net = max(net, previous[2])
+        self._orders[cl] = (order["symbol"], order["side"], net, version)
         if order.get("order_id"):
             self._order_ids.add(order["order_id"])
 
@@ -78,7 +88,7 @@ class Reconciler:
 
     def orderentry_positions(self) -> dict[str, int]:
         out: dict[str, int] = {}
-        for symbol, side, filled in self._orders.values():
+        for symbol, side, filled, _version in self._orders.values():
             if filled:
                 out[symbol] = out.get(symbol, 0) + (filled if side == "BUY" else -filled)
         return out

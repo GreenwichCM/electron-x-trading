@@ -53,6 +53,7 @@ def order_row(stream_id: str, o: dict[str, Any]) -> dict[str, Any]:
         "status": o["status"],
         "order_id": o.get("order_id", ""),
         "cum_qty": int(o.get("cum_qty", 0)),
+        "busted_qty": _opt_int(o.get("busted_qty")),  # updates from before step 23 have none
         "avg_px": float(o.get("avg_px", 0.0)),
         "message": (o.get("text") or "")[:400],
         "created_at": parse_time(o.get("created")),
@@ -67,6 +68,7 @@ def order_row(stream_id: str, o: dict[str, Any]) -> dict[str, Any]:
         "request_id": o.get("request_id") or None,
         "exec_id": o.get("exec_id") or None,
         "exec_type": o.get("exec_type") or None,
+        "exec_ref_id": o.get("exec_ref_id") or None,
         "exchange_time": parse_time(o.get("exchange_time")),
         "last_qty": _opt_int(o.get("last_qty")),
         "last_px": _opt_float(o.get("last_px")),
@@ -107,6 +109,17 @@ def fill_row(stream_id: str, f: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def bust_row(stream_id: str, f: dict[str, Any]) -> dict[str, Any]:
+    """A trade bust from the fills stream: it marks the fill it cancels (`exec_ref_id`) as busted."""
+    return {
+        "stream_id": stream_id,
+        "exec_ref_id": f["exec_ref_id"],
+        "bust_exec_id": f["exec_id"],
+        "busted_at": parse_time(f.get("time")),
+        "bust_reason": (f.get("reason") or "")[:400] or None,
+    }
+
+
 def report_row(stream_id: str, r: dict[str, Any]) -> dict[str, Any]:
     """An ExecutionReport as the drop copy received it (stream `exchange_reports`)."""
     return {
@@ -125,6 +138,7 @@ def report_row(stream_id: str, r: dict[str, Any]) -> dict[str, Any]:
         "symbol": r["symbol"],
         "side": r.get("side", ""),
         "exec_type": r["exec_type"],
+        "exec_ref_id": r.get("exec_ref_id") or None,
         "ord_status": r.get("ord_status", ""),
         "order_qty": _opt_int(r.get("order_qty")),
         "price": _opt_float(r.get("price")),

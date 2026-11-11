@@ -36,10 +36,12 @@ def _flag(msg: FixMessage, tag: int) -> bool | None:
 def report_fields(msg: FixMessage) -> dict[str, Any]:
     """What happened at the exchange: the report's own id and type, the fill if it is one, and why an order
     was rejected or cancelled by the exchange."""
-    trade = msg.get(150) == "F"
+    trade = msg.get(150) in ("F", "H")  # a trade, or the bust (cancel) of one: both carry the trade
     return {
         "exec_id": msg.get(17, ""),  # ExecID
-        "exec_type": msg.get(150, ""),  # ExecType: 0 new, 4 cancelled, 5 replaced, 8 rejected, C expired, F trade
+        "exec_type": msg.get(150, ""),  # ExecType: 0 new, 4 cancelled, 5 replaced, 8 rejected, C expired,
+        # F trade, H trade bust
+        "exec_ref_id": msg.get(19) or None,  # ExecRefID: on a bust, the ExecID of the fill it cancels
         "exchange_time": msg.get(60, ""),  # TransactTime, UTC to the nanosecond
         "last_qty": _int(msg, 32) if trade else None,  # LastQty
         "last_px": _float(msg, 31) if trade else None,  # LastPx

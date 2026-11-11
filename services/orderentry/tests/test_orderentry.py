@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from trading_core import KillSwitchState, TraderBlock
 from trading_core.rules import ANY, Limits, Trader, TradingRules
-from trading_fix import FixSession, SeqStore, SessionConfig
+from trading_fix import FixMessage, FixSession, SeqStore, SessionConfig
 from trading_orderentry import (
     Instrument,
     MemorySink,
@@ -386,3 +386,66 @@ def test_cancels_by_the_kill_switch_say_who_tripped_it_and_why():
             await wait_for(lambda: h.sink.latest(o.cl_ord_id)["status"] == "canceled")
 
     run(scenario())
+
+
+def test_a_trade_bust_takes_the_fill_back_out_of_the_position():
+    async def scenario():
+        async with Harness() as h:
+            order = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(OFFER))
+            await wait_for(lambda: order.status == Status.FILLED)
+            assert h.oe.positions[("alice", SYMBOL)] == 1
+            h.exchange.bust(reason="Erroneous trade")
+            await wait_for(lambda: order.busted_qty == 1)
+            assert h.oe.positions[("alice", SYMBOL)] == 0
+            assert order.status == Status.FILLED and order.cum_qty == 1  # as the exchange reports it
+            event = h.sink.latest(order.cl_ord_id)
+            assert event["event"] == "trade_bust" and event["exec_type"] == "H" and event["by"] == "exchange"
+            assert event["reason"] == "Erroneous trade" and event["exec_ref_id"] == order.busted[0]
+            assert event["busted_qty"] == 1 and event["last_qty"] == 1
+            again = FixMessage([(35, "8"), (11, order.cl_ord_id), (150, "H"), (19, order.busted[0]), (32, "1")])
+            h.oe.on_app_message(h.session, again)  # resent: counted once
+            assert h.oe.positions[("alice", SYMBOL)] == 0 and order.busted_qty == 1
+
+    run(scenario())
+
+
+class RecordingSession:
+    """Stands in for the FIX session: numbers what is sent, as the real one does."""
+
+    logged_on = True
+
+    def __init__(self):
+        self.seq = 0
+
+    def send(self, msg_type, body, header=()):
+        self.seq += 1
+        return self.seq
+
+
+def test_a_session_reject_answers_the_order_or_cancel_it_names():
+    oe = OrderEntryApp(
+        MemorySink(),
+        account="TA-TEST",
+        default_trader="trader@example.com",
+        rules=TradingRules.everyone(
+            ["alice"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
+        ),
+        instruments={SYMBOL: Instrument(SYMBOL, 0.25, low_limit=0.0, high_limit=500.0, state="OPEN")},
+    )
+    session = RecordingSession()
+    oe.on_logon(session)
+    first = oe.submit("alice", SYMBOL, "BUY", 1, 45.0)  # sequence number 1
+    second = oe.submit("alice", SYMBOL, "BUY", 1, 44.0)  # 2
+    reject = [(35, "3"), (45, "1"), (371, "44"), (373, "5"), (58, "Value is incorrect")]
+    oe.on_app_message(session, FixMessage(reject))
+    assert first.status == Status.REJECTED and first.text.endswith("Value is incorrect (tag 44)")
+    assert second.status == Status.PENDING_NEW
+    event = oe.sink.latest(first.cl_ord_id)
+    assert event["event"] == "session_reject" and event["reject_code"] == 5 and event["by"] == "exchange"
+
+    oe.cancel("alice", second.cl_ord_id)  # 3
+    assert second.status == Status.PENDING_CANCEL
+    oe.on_app_message(session, FixMessage([(35, "3"), (45, "3"), (58, "Required tag missing")]))
+    assert second.status == Status.PENDING_NEW  # the cancel never left: the order is as it was
+    assert oe.sink.latest(second.cl_ord_id)["request_id"].startswith("T")
+    oe.on_app_message(session, FixMessage([(35, "3"), (45, "99")]))  # not ours: nothing happens

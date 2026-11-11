@@ -7,6 +7,9 @@ or withdrawn by whoever proposed it. Everything stays in electronx.rule_changes 
 
 If the rule was changed after a proposal (by another approved change, or in SSMS), approving it would
 silently undo that, so the proposal becomes 'stale' instead: propose it again from the current rule.
+
+Each ElectronX trader id belongs to one trader at most. Approving one also gives that trader the
+orders from the ElectronX screen already recorded under it without a trader (attribution.py).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from typing import Any
 from trading_core import Market
 from trading_core.rules import ANY, LIMIT_NAMES, TRADER_WIDE
 
+from .attribution import fill_in_traders
 from .connection import Connection
 from .migrate import SCHEMA
 
@@ -158,6 +162,24 @@ def _after(change: ProposedChange, before: dict[str, Any] | None) -> dict[str, A
     return dict(change.values)  # a limit row becomes exactly the values given; blank ones are not set
 
 
+def _check_id_free(conn: Connection, trader_id: str, after: dict[str, Any] | None) -> None:
+    """ChangeError(409) if another trader already has the ElectronX id this change gives `trader_id`."""
+    exchange_id = (after or {}).get("exchange_trader_id")
+    if not exchange_id:
+        return
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT trader_id, exchange_trader_id FROM {SCHEMA}.traders"
+        " WHERE exchange_trader_id = %(id)s AND trader_id <> %(trader)s",  # in any case, as SQL Server compares
+        {"id": exchange_id, "trader": trader_id},
+    )
+    row = cur.fetchone()
+    if row is not None:
+        raise ChangeError(
+            409, f"{row[0]} already has the ElectronX id {row[1]}: each ElectronX id belongs to one trader"
+        )
+
+
 def current_rules(conn: Connection) -> dict[str, list[dict[str, Any]]]:
     """Every trader, entitlement and limit row, for showing in the app."""
     cur = conn.cursor(as_dict=True)
@@ -194,6 +216,8 @@ def propose(conn: Connection, user: str, change: ProposedChange) -> int:
         raise ChangeError(409, "there is no such rule to remove")
     if after == before:
         raise ChangeError(409, "that is already the rule")
+    if change.kind == "trader":
+        _check_id_free(conn, change.trader_id, after)
     cur = conn.cursor()
     cur.execute(
         f"INSERT {SCHEMA}.rule_changes (kind, action, trader_id, market, product, before_json, after_json, reason,"
@@ -247,7 +271,11 @@ def approve(conn: Connection, change_id: int, user: str) -> None:
             conn.commit()
             raise ChangeError(409, "the rule changed after this was proposed, so it was not applied; propose it again")
         after = None if row["after_json"] is None else json.loads(row["after_json"])
+        if row["kind"] == "trader":
+            _check_id_free(conn, key["trader_id"], after)  # someone may have been given it since
         _apply(conn, row["kind"], key, before, after)
+        if row["kind"] == "trader" and after and after.get("exchange_trader_id"):
+            fill_in_traders(conn, after["exchange_trader_id"])  # their screen orders recorded before now
         _decide(conn, change_id, "approved", user)
         conn.commit()
     except Exception:

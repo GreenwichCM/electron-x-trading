@@ -4,7 +4,8 @@ skipped without one."""
 from contextlib import closing
 
 import pytest
-from trading_db import connect, load_rules, migrate, seed_dev_rules
+from trading_db import DbError, connect, load_rules, migrate, seed_dev_rules
+from trading_db.attribution import fill_in_traders, unknown_users
 from trading_db.changes import (
     ChangeError,
     ProposedChange,
@@ -135,3 +136,70 @@ def test_reject_withdraw_and_remove(db):
     assert desk["max_order_qty"] == 5 and desk["max_loss"] == 5000.0
     with pytest.raises(ChangeError, match="no such rule"):
         propose(db, "bob", ProposedChange("entitlement", "delete", "alice", "PJM", "*", reason="x"))
+
+
+def trader(trader_id, exchange_id, reason="their ElectronX login"):
+    return ProposedChange("trader", "set", trader_id, values={"exchange_trader_id": exchange_id}, reason=reason)
+
+
+def screen_order(conn, cl, exchange_user, trader=""):
+    """An order from the ElectronX screen as the recorder keeps it, with one event."""
+    row = {"cl": cl, "user": exchange_user, "trader": trader}
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT electronx.orders (cl_ord_id, version, trader, symbol, side, qty, price, tif, status, order_id,"
+        " cum_qty, avg_px, message, last_stream_id, source, exchange_user) VALUES (%(cl)s, 1, %(trader)s, 'S',"
+        " 'BUY', 1, 45, 'DAY', 'new', 'O1', 0, 0, '', '1-0', 'electronx', %(user)s)",
+        row,
+    )
+    cur.execute(
+        "INSERT electronx.order_events (stream_id, cl_ord_id, version, trader, symbol, side, qty, price, tif,"
+        " status, order_id, cum_qty, avg_px, message, source, exchange_user) VALUES (%(cl)s, %(cl)s, 1,"
+        " %(trader)s, 'S', 'BUY', 1, 45, 'DAY', 'new', 'O1', 0, 0, '', 'electronx', %(user)s)",
+        row,
+    )
+    conn.commit()
+
+
+def traders_of(conn, table):
+    cur = conn.cursor()
+    cur.execute(f"SELECT cl_ord_id, trader FROM electronx.{table} ORDER BY cl_ord_id")
+    return cur.fetchall()
+
+
+def test_an_electronx_id_belongs_to_one_trader(db):
+    approve(db, propose(db, "bob", trader("alice", "a@x.com")), "erin")
+    with pytest.raises(ChangeError, match="alice already has the ElectronX id") as exc:
+        propose(db, "bob", trader("dave", "A@X.com"))  # the same id in another case
+    assert exc.value.status == 409
+    # Two proposals for the same id: whichever is approved second is refused.
+    first = propose(db, "bob", trader("dave", "d@x.com"))
+    second = propose(db, "bob", trader("carol", "d@x.com"))
+    approve(db, first, "erin")
+    with pytest.raises(ChangeError, match="dave already has"):
+        approve(db, second, "erin")
+    assert statuses(db)[second] == "pending"  # nothing applied; it can be rejected
+    cur = db.cursor()
+    with pytest.raises(DbError):  # and the database itself refuses it, for changes made in SSMS
+        cur.execute("UPDATE electronx.traders SET exchange_trader_id = 'D@x.com' WHERE trader_id = N'alice'")
+    db.rollback()
+
+
+def test_approving_an_electronx_id_gives_that_trader_their_screen_orders(db):
+    screen_order(db, "UI-1", "d@x.com")
+    screen_order(db, "UI-2", "z@x.com")
+    screen_order(db, "UI-3", "d@x.com", trader="erin")  # already someone's: kept
+    unknown = unknown_users(db)
+    assert {(u.exchange_user, u.orders, u.owner) for u in unknown} == {("d@x.com", 1, None), ("z@x.com", 1, None)}
+    approve(db, propose(db, "bob", trader("dave", "d@x.com")), "erin")
+    for table in ("orders", "order_events"):
+        assert traders_of(db, table) == [("UI-1", "dave"), ("UI-2", ""), ("UI-3", "erin")]
+    assert [u.exchange_user for u in unknown_users(db)] == ["z@x.com"]
+
+    cur = db.cursor()  # given in SSMS instead: only check-traders --fill-in catches up
+    cur.execute("UPDATE electronx.traders SET exchange_trader_id = 'z@x.com' WHERE trader_id = N'alice'")
+    db.commit()
+    assert [(u.exchange_user, u.owner) for u in unknown_users(db)] == [("z@x.com", "alice")]
+    assert fill_in_traders(db) == {"orders": 1, "order_events": 1}
+    db.commit()
+    assert unknown_users(db) == [] and traders_of(db, "orders")[1] == ("UI-2", "alice")

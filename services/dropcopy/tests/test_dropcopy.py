@@ -239,3 +239,40 @@ def test_every_execution_report_is_published_as_received():
             assert len(h.sink.reports) == before
 
     run(scenario())
+
+
+def test_a_trade_bust_undoes_its_fill(tmp_path):
+    async def scenario():
+        async with Harness(FillJournal(tmp_path / "fills.jsonl")) as h:
+            h.buy_at_ask("C1")
+            await wait_for(lambda: h.app.positions.get(SYMBOL) == 1)
+            assert h.exchange.bust(reason="Erroneous trade") == 1
+            await wait_for(lambda: h.app.positions.get(SYMBOL) == 0)
+            fill, bust = h.sink.fills
+            assert bust["bust"] and bust["exec_ref_id"] == fill["exec_id"] and bust["qty"] == 1
+            assert bust["reason"] == "Erroneous trade" and h.sink.latest_positions == {SYMBOL: 0}
+            order = next(iter(h.app.orders.values()))
+            assert order.busted_qty == 1 and order.filled == 0 and order.status == "filled" and order.cum_qty == 1
+            assert order.events[-1]["event"] == "trade_bust" and order.events[-1]["exec_ref_id"] == fill["exec_id"]
+            report = h.sink.reports[-1]
+            assert report["exec_type"] == "H" and report["exec_ref_id"] == fill["exec_id"]
+        again = DropCopyApp(MemoryFillSink(), FillJournal(tmp_path / "fills.jsonl"))
+        assert again.positions == {SYMBOL: 0}  # the bust is in the journal too
+
+    run(scenario())
+
+
+def test_a_rejected_screen_order_is_recorded_by_its_clordid():
+    async def scenario():
+        async with Harness() as h:
+            o = h.exchange.screen_order("firms/h/users/dave", SYMBOL, "1", 1, 45.13)  # not on the tick
+            await wait_for(lambda: any(e.status == "rejected" for e in h.app.orders.values()))
+            (rejected,) = h.app.orders.values()
+            assert rejected.cl_ord_id == o.cl_ord_id and rejected.order_id == ""
+            split = Reconciler(screen_after_s=0).split(h.app.orders.values())
+            assert split.screen_orders == [rejected]
+            (event,) = rejected.events
+            assert event["status"] == "rejected" and event["order_id"] == "" and event["exec_type"] == "8"
+            assert event["exchange_user"] == "firms/h/users/dave" and "tick" in event["reason"]
+
+    run(scenario())

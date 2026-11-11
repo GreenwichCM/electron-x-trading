@@ -229,6 +229,11 @@ def create_app(
         log.warning("kill switch %s by %s: %s", "ON" if state.active else "OFF", user.id, state.reason)
         return state.__dict__
 
+    @app.get("/api/exchange-users/unknown")
+    async def unknown_exchange_users(user: Annotated[User, Depends(require("risk.view.all"))]) -> list[dict[str, Any]]:
+        """ElectronX users trading on the screen whose ElectronX id no trader here has."""
+        return app.state.orders.unknown_users()
+
     @app.get("/api/positions")
     async def positions(user: Annotated[User, Depends(require("risk.view.all"))]) -> dict[str, Any]:
         """The exchange's positions for the whole account (drop copy) next to orderentry's, per trader.
@@ -339,7 +344,9 @@ def create_app(
         await ws.accept()
         try:
             msg = await asyncio.wait_for(ws.receive_json(), WS_AUTH_TIMEOUT_S)
-        except TimeoutError, WebSocketDisconnect, ValueError:
+        except WebSocketDisconnect:
+            return None  # the browser left before signing in (signing out, leaving the page): nothing to close
+        except TimeoutError, ValueError:
             await ws.close(code=WS_UNAUTHORIZED)
             return None
         token = msg.get("token", "") if isinstance(msg, dict) and msg.get("type") == "auth" else ""

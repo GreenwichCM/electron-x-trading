@@ -13,7 +13,7 @@ from trading_db import Connection
 
 ORDER_COLUMNS = (
     "cl_ord_id, version, trader, symbol, side, qty, price, tif, status, order_id, cum_qty, avg_px, "
-    "message, created_at, updated_at, source, exchange_user"
+    "message, created_at, updated_at, source, exchange_user, busted_qty"
 )
 # An order from the ElectronX screen has no trader: it belongs to whoever has its ElectronX id, if only one does.
 TRADER = (
@@ -23,12 +23,13 @@ TRADER = (
 ORDER_VALUES = (
     f"%(cl_ord_id)s, %(version)s, {TRADER}, %(symbol)s, %(side)s, %(qty)s, %(price)s, %(tif)s, %(status)s, "
     "%(order_id)s, %(cum_qty)s, %(avg_px)s, %(message)s, %(created_at)s, %(updated_at)s, %(source)s, "
-    "%(exchange_user)s"
+    "%(exchange_user)s, %(busted_qty)s"
 )
 
 # The event itself: what happened, who or what caused it, and the exchange's report (order_events only).
 EVENT_COLUMNS = (
-    "event, by_user, reason, event_at, request_id, exec_id, exec_type, exchange_time, last_qty, last_px, "
+    "event, by_user, reason, event_at, request_id, exec_id, exec_type, exec_ref_id, exchange_time, last_qty, "
+    "last_px, "
     "leaves_qty, reject_code, restatement_reason, trade_id, aggressor, commission, account_type, account, capacity, "
     "ord_type, manual"
 )
@@ -48,7 +49,7 @@ UPSERT_ORDER = f"""
 UPDATE electronx.orders SET
     version = %(version)s, status = %(status)s, order_id = %(order_id)s, cum_qty = %(cum_qty)s,
     avg_px = %(avg_px)s, message = %(message)s, updated_at = %(updated_at)s, last_stream_id = %(stream_id)s,
-    leaves_qty = %(leaves_qty)s, last_event = %(event)s,
+    leaves_qty = %(leaves_qty)s, last_event = %(event)s, busted_qty = COALESCE(%(busted_qty)s, busted_qty),
     account = COALESCE(%(account)s, account), capacity = COALESCE(%(capacity)s, capacity),
     ord_type = COALESCE(%(ord_type)s, ord_type), manual = COALESCE(%(manual)s, manual),
     exchange_user = COALESCE(%(exchange_user)s, exchange_user)
@@ -69,13 +70,20 @@ IF NOT EXISTS (SELECT 1 FROM electronx.fills WHERE exec_id = %(exec_id)s)
 
 REPORT_COLUMNS = (
     "exec_id, stream_id, received_at, exchange_time, order_id, cl_ord_id, orig_cl_ord_id, exchange_user, account, "
-    "account_type, capacity, manual, symbol, side, exec_type, ord_status, order_qty, price, tif, cum_qty, leaves_qty, "
-    "avg_px, last_qty, last_px, trade_id, aggressor, commission, reject_code, restatement_reason, text, raw"
+    "account_type, capacity, manual, symbol, side, exec_type, exec_ref_id, ord_status, order_qty, price, tif, "
+    "cum_qty, leaves_qty, avg_px, last_qty, last_px, trade_id, aggressor, commission, reject_code, "
+    "restatement_reason, text, raw"
 )
 INSERT_REPORT = f"""
 IF NOT EXISTS (SELECT 1 FROM electronx.exchange_reports WHERE exec_id = %(exec_id)s)
     INSERT electronx.exchange_reports ({REPORT_COLUMNS})
     VALUES ({", ".join(f"%({c.strip()})s" for c in REPORT_COLUMNS.split(","))});
+"""
+
+# A bust keeps the fill it cancels, marked: sum `qty` over fills WHERE busted_at IS NULL for what stands.
+MARK_BUST = """
+UPDATE electronx.fills SET busted_at = %(busted_at)s, bust_exec_id = %(bust_exec_id)s, bust_reason = %(bust_reason)s
+WHERE exec_id = %(exec_ref_id)s AND bust_exec_id IS NULL;
 """
 
 INSERT_ALERT = """
@@ -109,6 +117,13 @@ def write_report(conn: Connection, row: dict[str, Any]) -> None:
 
 def write_fill(conn: Connection, row: dict[str, Any]) -> None:
     conn.cursor().execute(INSERT_FILL, row)
+
+
+def write_bust(conn: Connection, row: dict[str, Any]) -> int:
+    """Mark the busted fill; returns 1, or 0 if that fill is not recorded (or was marked already)."""
+    cur = conn.cursor()
+    cur.execute(MARK_BUST, _precise(row, "busted_at"))
+    return cur.rowcount
 
 
 def write_alert(conn: Connection, row: dict[str, Any]) -> None:

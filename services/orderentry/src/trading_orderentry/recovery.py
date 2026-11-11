@@ -8,7 +8,7 @@ Two sources, used together:
 
 Every order carries a version that goes up on each update, so an update read twice, or an older one
 read after a newer one, changes nothing. Positions move only by the change in an order's filled
-quantity, so they cannot be counted twice either.
+quantity (less what the exchange has busted), so they cannot be counted twice either.
 
 What this cannot see is what happened at the exchange while orderentry was down. Within the FIX
 week the exchange resends those ExecutionReports after logon. Across the weekly sequence reset
@@ -58,7 +58,7 @@ def apply(rec: Recovered, update: Mapping[str, Any]) -> bool:
     old = rec.orders.get(new.cl_ord_id)
     if old is not None and new.version < old.version:
         return False
-    filled = new.cum_qty - (old.cum_qty if old else 0)
+    filled = new.net_filled - (old.net_filled if old else 0)
     if filled:
         key = (new.trader, new.symbol)
         rec.positions[key] = rec.positions.get(key, 0) + (filled if new.side == "BUY" else -filled)

@@ -150,3 +150,15 @@ def test_only_the_contracts_held_are_read_again():
         assert e.instruments[X]["high_limit"] == 60.0 and Y not in e.instruments
 
     asyncio.run(scenario())
+
+
+def test_a_trade_bust_undoes_its_fill():
+    e = RiskEngine(TradingRules.everyone(["alice"], max_loss=1000, max_position=10), clock=Clock())
+    e.on_order(order("A1", "alice"))
+    e.on_fill(fill("E1", "A1", "BUY", 2, 40.0))
+    e.on_fill(fill("E2", "A1", "BUY", 1, 41.0))
+    e.on_book(book(42.0, 43.0))  # mark 42.5
+    e.on_fill({**fill("B1", "A1", "BUY", 2, 40.0), "bust": True, "exec_ref_id": "E1"})
+    snap = e.snapshot()
+    assert snap["traders"]["alice"]["positions"][X]["qty"] == 1
+    assert snap["desk"]["total"] == 1.5  # as if only the fill at 41 had happened: 1 x (42.5 - 41)

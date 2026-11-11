@@ -9,6 +9,7 @@ import Positions from "./Positions";
 import PriceBoard, { type Working } from "./PriceBoard";
 import Risk from "./Risk";
 import Rules from "./Rules";
+import UnknownUsers from "./UnknownUsers";
 import { useBoard } from "./useBoard";
 import { useMarketData } from "./useMarketData";
 import { LIVE, useOrders } from "./useOrders";
@@ -105,6 +106,7 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
           />
         </div>
       </div>
+      {user.permissions.includes("risk.view.all") && <UnknownUsers />}
       <Blotter orders={orderList} user={user} />
       {(user.permissions.includes("risk.view.own") || user.permissions.includes("risk.view.all")) && (
         <Risk user={user} />

@@ -7,6 +7,11 @@ screen can be recorded too (see reconcile.py for how ours and theirs are told ap
 such an order becomes one event (`events`), the order's state just after it with the report's details,
 so its whole history is recorded, not only its latest state.
 
+A trade bust (ExecType H: the exchange cancelled a trade after the fact) undoes its fill: it is
+published on the fills stream like a fill, with `bust` set and `exec_ref_id` naming the fill, and the
+positions go back by its quantity. Its report repeats the order as it was at the trade, so it changes
+nothing else about the order.
+
 Every report, on our orders and on orders from the screen alike, is also published as received
 (FillSink.report): the exchange's own record, which `python -m trading_db reconcile` compares with
 what orderentry's session reported.
@@ -119,6 +124,7 @@ class ExchangeOrder:
     account: str = ""  # Account(1)
     capacity: str = ""  # CustOrderCapacity(582)
     events: list[dict[str, Any]] = field(default_factory=list)  # reports not published yet, in order
+    busted_qty: int = 0  # lots of its fills the exchange has since cancelled (trade busts)
     announced: bool = False  # logged as an order from the screen
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +142,7 @@ class ExchangeOrder:
             "tif": self.tif,
             "status": self.status,
             "cum_qty": self.cum_qty,
+            "busted_qty": self.busted_qty,
             "avg_px": self.avg_px,
             "text": self.text,
             "manual": self.manual,
@@ -184,7 +191,7 @@ class DropCopyApp:
         if not exec_id or exec_id in self.seen:
             return  # a resent copy of a report we already have
         self.sink.report(exchange_report(msg))
-        if msg.get(150) != "F":
+        if msg.get(150) not in ("F", "H"):  # not a trade, nor the bust of one
             self.seen.add(exec_id)
             self._track(msg)
             return
@@ -204,19 +211,33 @@ class DropCopyApp:
         details = report_fields(msg)
         fill.update({k: details[k] for k in ("trade_id", "aggressor", "commission", "leaves_qty")})
         fill["capacity"] = msg.get(582, "")
+        if msg.get(150) == "H":  # the exchange cancelled this trade: its fill is undone
+            fill.update(bust=True, exec_ref_id=msg.get(19, ""), reason=msg.get(58, ""))
         if self.journal is not None:
             self.journal.append(fill)
         self._apply(fill, first_seen=self.clock())
         self._track(msg)
-        log.info(
-            "fill %s %s %d %s @ %s (%s)",
-            fill["exec_id"],
-            fill["side"],
-            fill["qty"],
-            fill["symbol"],
-            fill["price"],
-            fill["user"] or "no user",
-        )
+        if fill.get("bust"):
+            log.warning(
+                "trade bust %s: fill %s (%s %d %s @ %s) cancelled by the exchange: %s",
+                fill["exec_id"],
+                fill["exec_ref_id"],
+                fill["side"],
+                fill["qty"],
+                fill["symbol"],
+                fill["price"],
+                fill["reason"] or "no reason given",
+            )
+        else:
+            log.info(
+                "fill %s %s %d %s @ %s (%s)",
+                fill["exec_id"],
+                fill["side"],
+                fill["qty"],
+                fill["symbol"],
+                fill["price"],
+                fill["user"] or "no user",
+            )
         self.sink.fill(fill)
         self.sink.positions(self.positions, self.connected)
 
@@ -225,7 +246,8 @@ class DropCopyApp:
     def _order(self, order_id: str, cl_ord_id: str, user: str, symbol: str, first_seen: float) -> ExchangeOrder:
         order = self.orders.get(order_id)
         if order is None:
-            order = ExchangeOrder(order_id, cl_ord_id, user, symbol, first_seen=first_seen)
+            exchange_id = "" if order_id.startswith("cl:") else order_id  # "cl:...": it has no OrderID
+            order = ExchangeOrder(exchange_id, cl_ord_id, user, symbol, first_seen=first_seen)
             self.orders[order_id] = order
         if cl_ord_id:
             order.cl_ord_ids.add(cl_ord_id)
@@ -234,35 +256,46 @@ class DropCopyApp:
     def _apply(self, fill: dict[str, Any], first_seen: float) -> None:
         self.seen.add(fill["exec_id"])
         signed = int(fill["qty"]) if fill["side"] == "BUY" else -int(fill["qty"])
+        if fill.get("bust"):
+            signed = -signed  # a bust takes its fill back out
         self.positions[fill["symbol"]] = self.positions.get(fill["symbol"], 0) + signed
         key = fill.get("order_id") or f"cl:{fill.get('cl_ord_id', '')}"
         order = self._order(key, fill.get("cl_ord_id", ""), fill.get("user", ""), fill["symbol"], first_seen)
         order.filled += signed
         order.side = order.side or fill["side"]
+        if fill.get("bust"):
+            order.busted_qty += int(fill["qty"])
 
     def _track(self, msg: FixMessage) -> None:
-        """Keep the order's record up to date from any report (a rejected order has no OrderID: skipped)."""
+        """Keep the order's record up to date from any report. An order the exchange rejected never got
+        an OrderID (37 is NONE): it is kept by its ClOrdID instead, so a rejected screen order is recorded
+        too."""
         order_id = msg.get(37, "")
-        if not order_id or order_id == "NONE":
-            return
-        order = self._order(order_id, msg.get(11, ""), msg.get(57, ""), msg.get(55, ""), self.clock())
-        order.side = SIDES.get(msg.get(54, ""), order.side)
-        order.qty = msg.get_int(38, order.qty)
-        order.price = msg.get_float(44, order.price)
-        order.tif = TIFS.get(msg.get(59, ""), order.tif)
-        order.status = STATUSES.get(msg.get(39, ""), order.status)
-        order.cum_qty = msg.get_int(14, order.cum_qty)
-        order.avg_px = msg.get_float(6, order.avg_px)
-        order.text = msg.get(58, "") or order.text
-        order.manual = msg.get(1028) == "Y"
+        cl = msg.get(11, "")
+        if order_id in ("", "NONE"):
+            if not cl:
+                return  # nothing to tell this order by
+            order_id = f"cl:{cl}"
+        order = self._order(order_id, cl, msg.get(57, ""), msg.get(55, ""), self.clock())
+        bust = msg.get(150) == "H"
+        if not bust:  # a bust's report repeats the order as it was at the trade: nothing new about it
+            order.side = SIDES.get(msg.get(54, ""), order.side)
+            order.qty = msg.get_int(38, order.qty)
+            order.price = msg.get_float(44, order.price)
+            order.tif = TIFS.get(msg.get(59, ""), order.tif)
+            order.status = STATUSES.get(msg.get(39, ""), order.status)
+            order.cum_qty = msg.get_int(14, order.cum_qty)
+            order.avg_px = msg.get_float(6, order.avg_px)
+            order.text = msg.get(58, "") or order.text
+            order.manual = msg.get(1028) == "Y"
+            order.account = msg.get(1, "") or order.account
+            order.capacity = msg.get(582, "") or order.capacity
         order.updated = msg.get(60, "") or order.updated
         order.created = order.created or order.updated
-        order.account = msg.get(1, "") or order.account
-        order.capacity = msg.get(582, "") or order.capacity
         order.version += 1
         user_action = msg.get(150) in USER_ACTIONS and not msg.get(378)
         event = {
-            "event": "exchange_report",
+            "event": "trade_bust" if bust else "exchange_report",
             "by": order.user if user_action else "exchange",
             "reason": msg.get(58, ""),
             "event_time": datetime.now(UTC).isoformat(timespec="milliseconds"),
