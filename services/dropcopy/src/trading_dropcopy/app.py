@@ -6,6 +6,10 @@ positions; all reports together keep one record per exchange order (ExchangeOrde
 screen can be recorded too (see reconcile.py for how ours and theirs are told apart). Each report on
 such an order becomes one event (`events`), the order's state just after it with the report's details,
 so its whole history is recorded, not only its latest state.
+
+Every report, on our orders and on orders from the screen alike, is also published as received
+(FillSink.report): the exchange's own record, which `python -m trading_db reconcile` compares with
+what orderentry's session reported.
 """
 
 from __future__ import annotations
@@ -41,21 +45,52 @@ STATUSES = {
 
 class FillSink(Protocol):
     def fill(self, fill: dict[str, Any]) -> None: ...
+    def report(self, report: dict[str, Any]) -> None: ...
     def positions(self, positions: dict[str, int], connected: bool) -> None: ...
 
 
 class MemoryFillSink:
     def __init__(self) -> None:
         self.fills: list[dict[str, Any]] = []
+        self.reports: list[dict[str, Any]] = []
         self.latest_positions: dict[str, int] = {}
         self.connected = False
 
     def fill(self, fill: dict[str, Any]) -> None:
         self.fills.append(fill)
 
+    def report(self, report: dict[str, Any]) -> None:
+        self.reports.append(report)
+
     def positions(self, positions: dict[str, int], connected: bool) -> None:
         self.latest_positions = dict(positions)
         self.connected = connected
+
+
+def exchange_report(msg: FixMessage) -> dict[str, Any]:
+    """An ExecutionReport as received: every field we use by name, and the whole message (`raw`)."""
+    return {
+        "exec_id": msg.get(17, ""),
+        "order_id": msg.get(37, ""),
+        "cl_ord_id": msg.get(11, ""),
+        "orig_cl_ord_id": msg.get(41, ""),  # the order an amend or cancel refers to
+        "exchange_user": msg.get(57, ""),  # TargetSubID: the trader's ElectronX id
+        "symbol": msg.get(55, ""),
+        "side": SIDES.get(msg.get(54, ""), ""),
+        "ord_status": msg.get(39, ""),  # OrdStatus, as sent
+        "order_qty": msg.get_int(38) if msg.get(38) else None,
+        "price": msg.get_float(44) if msg.get(44) else None,
+        "tif": TIFS.get(msg.get(59, ""), msg.get(59, "")),
+        "cum_qty": msg.get_int(14) if msg.get(14) else None,
+        "avg_px": msg.get_float(6) if msg.get(6) else None,
+        "text": msg.get(58, ""),
+        "account": msg.get(1, ""),
+        "capacity": msg.get(582, ""),
+        "manual": msg.get(1028) == "Y" if msg.get(1028) else None,
+        "received": datetime.now(UTC).isoformat(timespec="milliseconds"),
+        **report_fields(msg),
+        "raw": repr(msg),  # every field the exchange sent (a password field would be masked)
+    }
 
 
 @dataclass
@@ -148,6 +183,7 @@ class DropCopyApp:
         exec_id = msg.get(17, "")
         if not exec_id or exec_id in self.seen:
             return  # a resent copy of a report we already have
+        self.sink.report(exchange_report(msg))
         if msg.get(150) != "F":
             self.seen.add(exec_id)
             self._track(msg)

@@ -1,7 +1,8 @@
 """Copy the Redis streams `orders`, `fills`, `alerts` and `screen_orders` into SQL Server, for good.
 
 `screen_orders` (from dropcopy) are orders entered on the ElectronX screen; they go into the same tables
-as ours, with source 'electronx'.
+as ours, with source 'electronx'. `exchange_reports` (from dropcopy) is every ExecutionReport the drop copy
+received, as received.
 
 Redis keeps only the latest 100,000 or so entries of each stream; SQL Server keeps everything. The
 recorder reads from where its last commit ended (dbo.stream_offsets), so stopping it, or SQL Server
@@ -21,11 +22,11 @@ from redis.exceptions import RedisError
 from trading_db import LATEST, Connection, DbError, schema_version
 
 from . import store
-from .rows import alert_row, decode_entry, fill_row, order_row
+from .rows import alert_row, decode_entry, fill_row, order_row, report_row
 
 log = logging.getLogger("recorder")
 
-STREAMS = ("orders", "fills", "alerts", "screen_orders")
+STREAMS = ("orders", "fills", "alerts", "screen_orders", "exchange_reports")
 RETRY_S = 2.0
 
 
@@ -135,6 +136,8 @@ class Recorder:
                 row = order_row(entry_id, data)
             elif stream == "fills":
                 row = fill_row(entry_id, data)
+            elif stream == "exchange_reports":
+                row = report_row(entry_id, data)
             else:
                 row = alert_row(entry_id, data, raw)
         except (KeyError, ValueError, TypeError) as exc:
@@ -144,6 +147,8 @@ class Recorder:
             store.write_order(self.conn, row)
         elif stream == "fills":
             store.write_fill(self.conn, row)
+        elif stream == "exchange_reports":
+            store.write_report(self.conn, row)
         else:
             store.write_alert(self.conn, row)
 

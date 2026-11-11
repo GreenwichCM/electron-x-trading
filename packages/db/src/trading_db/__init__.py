@@ -2,6 +2,7 @@
 
 from .connection import Connection, DbError, connect
 from .migrate import LATEST, SCHEMA, MigrationError, batches, load_migrations, migrate, schema_version, status
+from .reconcile import Reconciliation, reconcile
 from .rules import follow_rules, load_rules, seed_dev_rules
 from .settings import ConfigError, DbSettings
 
@@ -21,5 +22,7 @@ __all__ = [
     "migrate",
     "schema_version",
     "seed_dev_rules",
+    "Reconciliation",
+    "reconcile",
     "status",
 ]

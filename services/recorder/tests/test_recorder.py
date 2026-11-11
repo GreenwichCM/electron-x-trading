@@ -3,10 +3,11 @@
 import json
 import threading
 from contextlib import closing
+from datetime import datetime
 
 import pytest
 from fakeredis import FakeRedis
-from trading_db import connect, migrate
+from trading_db import connect, migrate, reconcile
 from trading_recorder import Recorder, SchemaError
 
 SYMBOL = "BFUT500-ERCOT-HB_NORTH-261231-15"
@@ -232,3 +233,45 @@ def test_the_whole_event_is_recorded(sql_server):
     assert query(sql_server, "SELECT trade_id, aggressor, commission, leaves_qty FROM electronx.fills") == [
         ("TM1", False, 0.5, 2)
     ]
+
+
+def test_reconcile_finds_the_reports_only_one_session_saw(sql_server):
+    migrate(sql_server)
+    r = FakeRedis()
+    at = "2026-11-11T02:00:40Z"
+
+    def event(version, exec_id, exec_type, cum_qty, status):
+        update = {**order("A", version, status, cum_qty=cum_qty), "order_id": "O9", "event_time": at}
+        return {**update, "event": "exchange_report", "by": "exchange", "exec_id": exec_id, "exec_type": exec_type}
+
+    def report(exec_id, exec_type, cum_qty, order_id="O9", cl_ord_id="A"):
+        return {
+            "exec_id": exec_id,
+            "order_id": order_id,
+            "cl_ord_id": cl_ord_id,
+            "symbol": SYMBOL,
+            "side": "BUY",
+            "exec_type": exec_type,
+            "ord_status": "1",
+            "cum_qty": cum_qty,
+            "received": at,
+            "raw": f"35=8|17={exec_id}",
+        }
+
+    add(r, "orders", {**order("A", 1), "event": "new_order", "by": "alice", "event_time": at})
+    add(r, "orders", event(2, "X1", "0", 0, "new"))  # on both sessions, same ExecID
+    add(r, "orders", event(3, "Y2", "F", 1, "partially_filled"))  # on both; the drop copy numbers it differently
+    add(r, "orders", event(4, "X4", "F", 2, "partially_filled"))  # the drop copy never had this one
+    add(r, "exchange_reports", report("X1", "0", 0))
+    add(r, "exchange_reports", report("D2", "F", 1))
+    add(r, "exchange_reports", report("X5", "F", 3))  # orderentry never recorded this one
+    add(r, "exchange_reports", report("S1", "0", 0, order_id="O77", cl_ord_id="UI-1"))  # from the screen: not compared
+    assert drain(make_recorder(r, sql_server)) == 8
+    assert query(sql_server, "SELECT raw FROM electronx.exchange_reports WHERE exec_id = 'X1'") == [("35=8|17=X1",)]
+
+    with closing(connect(sql_server)) as conn:
+        result = reconcile(conn, since=datetime(2026, 11, 11), until=datetime(2026, 11, 12))
+    assert (result.drop_copy_reports, result.orderentry_reports) == (3, 3)
+    assert [row[2] for row in result.drop_copy_only] == ["X5"]
+    assert [row[2] for row in result.orderentry_only] == ["X4"]
+    assert not result.ok

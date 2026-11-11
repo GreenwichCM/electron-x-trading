@@ -3,6 +3,7 @@
 Redis layout:
   * XADD fills            every fill from the drop copy, with the trader's ElectronX id (`user`)
   * XADD screen_orders    every update to an order entered on the ElectronX screen (the recorder keeps them)
+  * XADD exchange_reports every ExecutionReport the drop copy receives, ours and the screen's, as received
   * SET  dc:positions     {"positions": {symbol: lots}, "screen": {symbol: lots},
                            "screen_by_user": {ElectronX user: {symbol: lots}}, "pending": {symbol: lots},
                            "connected": bool, "time": ...}
@@ -31,6 +32,7 @@ log = logging.getLogger("dc.redis")
 
 FILLS_STREAM = "fills"
 SCREEN_ORDERS_STREAM = "screen_orders"
+REPORTS_STREAM = "exchange_reports"
 POSITIONS_KEY = "dc:positions"
 ORDERS_STREAM = "orders"
 STREAM_MAXLEN = 100_000
@@ -57,6 +59,9 @@ class RedisFillSink:
     def screen_order(self, order: dict[str, Any]) -> None:
         self._queue.put_nowait(("screen_order", order))
 
+    def report(self, report: dict[str, Any]) -> None:
+        self._queue.put_nowait(("report", report))
+
     def changed(self, split: Split) -> bool:
         """True if the split differs from the one last published."""
         return split.published() != self.split
@@ -80,6 +85,8 @@ class RedisFillSink:
                         await self.redis.xadd(FILLS_STREAM, {"data": json.dumps(data)}, maxlen=STREAM_MAXLEN)
                     elif kind == "screen_order":
                         await self.redis.xadd(SCREEN_ORDERS_STREAM, {"data": json.dumps(data)}, maxlen=STREAM_MAXLEN)
+                    elif kind == "report":
+                        await self.redis.xadd(REPORTS_STREAM, {"data": json.dumps(data)}, maxlen=STREAM_MAXLEN)
                     else:
                         await self.redis.set(POSITIONS_KEY, json.dumps(data))
                     break

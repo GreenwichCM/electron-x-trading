@@ -107,6 +107,43 @@ def fill_row(stream_id: str, f: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def report_row(stream_id: str, r: dict[str, Any]) -> dict[str, Any]:
+    """An ExecutionReport as the drop copy received it (stream `exchange_reports`)."""
+    return {
+        "exec_id": r["exec_id"],
+        "stream_id": stream_id,
+        "received_at": parse_time(r.get("received")),
+        "exchange_time": parse_time(r.get("exchange_time")),
+        "order_id": r.get("order_id", ""),
+        "cl_ord_id": r.get("cl_ord_id", ""),
+        "orig_cl_ord_id": r.get("orig_cl_ord_id") or None,
+        "exchange_user": r.get("exchange_user") or None,
+        "account": r.get("account") or None,
+        "account_type": r.get("account_type") or None,
+        "capacity": r.get("capacity") or None,
+        "manual": r.get("manual"),
+        "symbol": r["symbol"],
+        "side": r.get("side", ""),
+        "exec_type": r["exec_type"],
+        "ord_status": r.get("ord_status", ""),
+        "order_qty": _opt_int(r.get("order_qty")),
+        "price": _opt_float(r.get("price")),
+        "tif": r.get("tif") or None,
+        "cum_qty": _opt_int(r.get("cum_qty")),
+        "leaves_qty": _opt_int(r.get("leaves_qty")),
+        "avg_px": _opt_float(r.get("avg_px")),
+        "last_qty": _opt_int(r.get("last_qty")),
+        "last_px": _opt_float(r.get("last_px")),
+        "trade_id": r.get("trade_id") or None,
+        "aggressor": r.get("aggressor"),
+        "commission": _opt_float(r.get("commission")),
+        "reject_code": _opt_int(r.get("reject_code")),
+        "restatement_reason": _opt_int(r.get("restatement_reason")),
+        "text": (r.get("text") or "")[:400] or None,
+        "raw": r["raw"],
+    }
+
+
 def alert_row(stream_id: str, a: dict[str, Any], raw: str) -> dict[str, Any]:
     """Kill switch states carry no type (they are the switch's state); trader blocks do."""
     kind = a.get("type") or ("killswitch_on" if a.get("active") else "killswitch_off")

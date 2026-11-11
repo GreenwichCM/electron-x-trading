@@ -211,3 +211,31 @@ def test_every_report_on_a_screen_order_becomes_an_event():
             assert new["source"] == "electronx" and new["manual"] is True and new["leaves_qty"] == 1
 
     run(scenario())
+
+
+def test_every_execution_report_is_published_as_received():
+    async def scenario():
+        async with Harness() as h:
+            h.buy_at_ask("C1", 2)  # ours: acknowledged, then filled
+            await wait_for(lambda: h.app.positions.get(SYMBOL) == 2)
+            await wait_for(lambda: len([r for r in h.sink.reports if r["cl_ord_id"] == "C1"]) >= 2)
+            ours = [r for r in h.sink.reports if r["cl_ord_id"] == "C1"]
+            assert [r["exec_type"] for r in ours][:2] == ["0", "F"] and len({r["exec_id"] for r in ours}) == len(ours)
+            new, fill = ours[0], ours[1]
+            assert (new["ord_status"], new["exchange_user"], new["order_qty"], new["leaves_qty"]) == (
+                "0",
+                "trader@example.com",
+                2,
+                2,
+            )
+            assert fill["last_qty"] >= 1 and fill["trade_id"] and fill["aggressor"] is True
+            assert "35=8" in new["raw"] and "11=C1" in new["raw"] and "57=trader@example.com" in new["raw"]
+
+            before = len(h.sink.reports)
+            h.gw.drop(DC)  # reconnecting does not publish anything twice
+            await wait_for(lambda: not h.app.connected)
+            await wait_for(lambda: h.app.connected, timeout=8)
+            await asyncio.sleep(0.3)
+            assert len(h.sink.reports) == before
+
+    run(scenario())

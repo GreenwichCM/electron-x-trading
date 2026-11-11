@@ -67,6 +67,17 @@ IF NOT EXISTS (SELECT 1 FROM electronx.fills WHERE exec_id = %(exec_id)s)
             %(commission)s, %(leaves_qty)s, %(capacity)s);
 """
 
+REPORT_COLUMNS = (
+    "exec_id, stream_id, received_at, exchange_time, order_id, cl_ord_id, orig_cl_ord_id, exchange_user, account, "
+    "account_type, capacity, manual, symbol, side, exec_type, ord_status, order_qty, price, tif, cum_qty, leaves_qty, "
+    "avg_px, last_qty, last_px, trade_id, aggressor, commission, reject_code, restatement_reason, text, raw"
+)
+INSERT_REPORT = f"""
+IF NOT EXISTS (SELECT 1 FROM electronx.exchange_reports WHERE exec_id = %(exec_id)s)
+    INSERT electronx.exchange_reports ({REPORT_COLUMNS})
+    VALUES ({", ".join(f"%({c.strip()})s" for c in REPORT_COLUMNS.split(","))});
+"""
+
 INSERT_ALERT = """
 IF NOT EXISTS (SELECT 1 FROM electronx.alerts WHERE stream_id = %(stream_id)s)
     INSERT electronx.alerts (stream_id, type, trader, by_user, reason, alert_time, data)
@@ -80,12 +91,20 @@ IF @@ROWCOUNT = 0 INSERT electronx.stream_offsets (stream, last_id) VALUES (%(st
 
 
 def write_order(conn: Connection, row: dict[str, Any]) -> None:
-    exchange_time = row.get("exchange_time")
-    if exchange_time is not None:  # as text: the driver would send a datetime to the millisecond only
-        row = {**row, "exchange_time": exchange_time.isoformat(timespec="microseconds")}
+    row = _precise(row, "exchange_time")
     cur = conn.cursor()
     cur.execute(INSERT_ORDER_EVENT, row)
     cur.execute(UPSERT_ORDER, row)
+
+
+def _precise(row: dict[str, Any], key: str) -> dict[str, Any]:
+    """A datetime as text, so it keeps its microseconds: the driver would send it to the millisecond only."""
+    value = row.get(key)
+    return row if value is None else {**row, key: value.isoformat(timespec="microseconds")}
+
+
+def write_report(conn: Connection, row: dict[str, Any]) -> None:
+    conn.cursor().execute(INSERT_REPORT, _precise(row, "exchange_time"))
 
 
 def write_fill(conn: Connection, row: dict[str, Any]) -> None:

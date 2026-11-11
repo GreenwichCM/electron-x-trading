@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from trading_recorder import alert_row, fill_row, order_row, parse_time
+from trading_recorder.rows import report_row
 
 
 def test_times_become_naive_utc():
@@ -87,3 +88,25 @@ def test_the_event_of_an_order_update():
     assert row["event_at"] == datetime(2026, 11, 11, 2, 0, 47, 567000) and row["reason"] is None
     old = order_row("2-0", {k: update[k] for k in ("cl_ord_id", "trader", "symbol", "side", "qty", "price", "status")})
     assert old["event"] is None and old["exec_id"] is None and old["manual"] is None  # from before step 20
+
+
+def test_an_exchange_report_as_received():
+    report = {
+        "exec_id": "E1",
+        "order_id": "O9",
+        "cl_ord_id": "C1",
+        "symbol": "BFUT500-ERCOT-HB_NORTH-261231-15",
+        "side": "BUY",
+        "exec_type": "F",
+        "ord_status": "2",
+        "order_qty": 2,
+        "cum_qty": 2,
+        "last_qty": 1,
+        "last_px": 45.25,
+        "exchange_time": "20261111-02:00:49.047894946",
+        "received": "2026-11-11T02:00:49.120+00:00",
+        "raw": "35=8|17=E1|...",
+    }
+    row = report_row("1-0", report)
+    assert (row["exec_type"], row["cum_qty"], row["last_px"], row["raw"]) == ("F", 2, 45.25, "35=8|17=E1|...")
+    assert row["exchange_time"] == datetime(2026, 11, 11, 2, 0, 49, 47894) and row["orig_cl_ord_id"] is None

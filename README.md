@@ -160,6 +160,15 @@ has a row for every change, so an order's whole life can be read back. Each even
     SELECT version, event, by_user, status, exec_type, last_qty, last_px, reason, event_at, exchange_time
     FROM electronx.order_events WHERE cl_ord_id = '<ClOrdID>' ORDER BY version
 
+Nothing in the app writes orders to the database: an action goes through orderentry and FIX to the
+exchange, and the exchange's reports decide each order's state; the recorder only copies the events. The
+exchange reports our orders twice, on orderentry's session and on the drop copy, and
+`electronx.exchange_reports` keeps every report the drop copy received (ours and the screen's) as
+received, with the whole FIX message in `raw`. `reconcile` compares the two, report by report, and lists
+any report only one side has (it exits with 1 if there is one):
+
+    uv run --env-file services/db.env python -m trading_db reconcile --hours 24
+
 To use another SQL Server (for example a shared company database), point `DB_HOST`, `DB_PORT`,
 `DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/db.env` at it and run `migrate`. For a
 login that can reach only the `electronx` schema, give your DBA `packages/db/dba-setup.sql`.
