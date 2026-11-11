@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 
 from trading_core import KillSwitchState, TraderBlock, TradingRules
-from trading_fix import FixMessage, FixSession, SessionError, utc_timestamp
+from trading_fix import FixMessage, FixSession, SessionError, report_fields, utc_timestamp
 
 from .orders import FROM_ORD_STATUS, LIVE, SIDE_TO_FIX, TIF_TO_FIX, Order, Status, now_iso
 from .recovery import Recovered
@@ -86,6 +86,11 @@ class OrderEntryApp:
                 len(live),
             )
 
+    def _restart_reason(self, order: Order) -> str:
+        if order.status == Status.PENDING_CANCEL:
+            return "after a restart: the cancel sent before it is not confirmed"
+        return "after a restart: from before the weekly sequence reset, its state cannot be confirmed"
+
     def cancel_unconfirmed(self) -> None:
         """Called about once a second: send one cancel for each restored order that needs it (from an
         earlier FIX week, or with a cancel in flight at the restart). The exchange either cancels it or
@@ -100,12 +105,14 @@ class OrderEntryApp:
             if not self.throttle.allow(is_cancel=True):
                 return  # the rest go out on the next call
             self._unconfirmed.discard(cl)
-            self._send_cancel(order)
+            self._send_cancel(order, by="orderentry", reason=self._restart_reason(order))
 
     # ---- requests from the api -------------------------------------------------------------
 
     def submit(self, trader: str, symbol: str, side: str, qty: int, price: float, tif: str = "DAY") -> Order:
         order = Order(self._new_id(), trader, symbol, side, qty, price, tif)
+        order.account, order.capacity = self.account, self.capacity
+        order.exchange_user = self._exchange_trader(trader)
         self.orders[order.cl_ord_id] = order
         reason = self._precheck(order)
         if reason is None:
@@ -119,22 +126,28 @@ class OrderEntryApp:
             log.info("rejected %s for %s: %s", order.cl_ord_id, trader, reason)
         else:
             log.info("sent %s %s %d %s @ %s for %s", order.cl_ord_id, side, qty, symbol, price, trader)
-        self._publish(order)
+        self._publish(order, {"event": "refused" if reason else "new_order", "by": trader, "reason": reason or ""})
         return order
 
     def cancel(self, trader: str, cl_ord_id: str) -> Order:
         order = self.orders.get(cl_ord_id)
         if order is None:
             raise OrderError(404, f"no order {cl_ord_id}")
+
+        def refuse(status_code: int, why: str) -> OrderError:
+            """A cancel that never left: recorded against the order (who asked, and why not), then refused."""
+            self._publish(order, {"event": "cancel_refused", "by": trader, "reason": why})
+            return OrderError(status_code, why)
+
         if order.trader != trader:
-            raise OrderError(403, "not your order")
+            raise refuse(403, "not your order")
         if not order.live or order.status == Status.PENDING_CANCEL:
-            raise OrderError(409, f"order is {order.status}")
+            raise refuse(409, f"order is {order.status}")
         if not self._logged_on():
-            raise OrderError(503, "not connected to the exchange")
+            raise refuse(503, "not connected to the exchange")
         if not self.throttle.allow(is_cancel=True):
-            raise OrderError(429, "message rate limit reached; try again in a moment")
-        self._send_cancel(order)
+            raise refuse(429, "message rate limit reached; try again in a moment")
+        self._send_cancel(order, by=trader)
         return order
 
     def set_kill_switch(self, state: KillSwitchState) -> None:
@@ -150,7 +163,7 @@ class OrderEntryApp:
                 if order.live and order.status != Status.PENDING_CANCEL:
                     if not self.throttle.allow(is_cancel=True):
                         return  # the rest go out on the next call
-                    self._send_cancel(order)
+                    self._send_cancel(order, by=state.by or "killswitch", reason=f"kill switch: {state.reason}")
 
     def set_blocks(self, blocks: Mapping[str, TraderBlock]) -> None:
         """Called with the current trader blocks about once a second. A blocked trader's new orders are
@@ -170,7 +183,8 @@ class OrderEntryApp:
                 if order.trader in blocks and order.live and order.status != Status.PENDING_CANCEL:
                     if not self.throttle.allow(is_cancel=True):
                         return  # the rest go out on the next call
-                    self._send_cancel(order)
+                    block = blocks[order.trader]
+                    self._send_cancel(order, by=block.by or "block", reason=f"trader blocked: {block.reason}")
 
     def set_rules(self, rules: TradingRules) -> None:
         """New trading rules (entitlements and limits) for orders from now on. Live orders are kept."""
@@ -194,7 +208,8 @@ class OrderEntryApp:
             out.setdefault(trader, {})[symbol] = qty
         return out
 
-    def _send_cancel(self, order: Order) -> None:
+    def _send_cancel(self, order: Order, by: str, reason: str = "") -> None:
+        """Send a cancel; `by` and `reason` say who or what asked for it (a trader, the kill switch, ...)."""
         cancel_id = self._new_id()
         self._cancel_ids[cancel_id] = order.cl_ord_id
         self._before_cancel[order.cl_ord_id] = order.status
@@ -210,9 +225,10 @@ class OrderEntryApp:
                 (38, str(order.qty)),
                 (60, utc_timestamp()),
             ],
-            header=[(50, self._exchange_trader(order.trader))],
+            header=[(50, order.exchange_user or self._exchange_trader(order.trader))],
         )
-        self._update(order, status=Status.PENDING_CANCEL)
+        event = {"event": "cancel_request", "by": by, "reason": reason, "request_id": cancel_id}
+        self._update(order, event, status=Status.PENDING_CANCEL)
 
     def orders_for(self, trader: str | None = None) -> list[Order]:
         """All orders (trader=None) or one trader's, newest first."""
@@ -235,10 +251,20 @@ class OrderEntryApp:
         elif mt == "9":
             self._on_cancel_reject(msg)
         elif mt == "j":
-            order = self.orders.get(msg.get(379, ""))
+            order = self.orders.get(msg.get(379, "")) or self.orders.get(self._cancel_ids.get(msg.get(379, ""), ""))
             log.error("business reject of %s: %s", msg.get(379), msg.get(58))
-            if order is not None and order.status == Status.PENDING_NEW:
-                self._update(order, status=Status.REJECTED, text=msg.get(58, ""))
+            if order is not None:
+                event = {
+                    "event": "business_reject",
+                    "by": "exchange",
+                    "reason": msg.get(58, ""),
+                    "reject_code": msg.get_int(380, 0) if msg.get(380) else None,
+                    "request_id": msg.get(379, ""),
+                }
+                if order.status == Status.PENDING_NEW:
+                    self._update(order, event, status=Status.REJECTED, text=msg.get(58, ""))
+                else:
+                    self._publish(order, event)  # for example a throttled cancel: the order itself is unchanged
 
     # ---- exchange messages -----------------------------------------------------------------
 
@@ -266,8 +292,12 @@ class OrderEntryApp:
         if exec_type == "F":
             log.info("fill %s %d @ %s", cl, msg.get_int(32), msg.get(31))
         order_id = msg.get(37, "")
+        event = {"event": "exchange_report", "by": "exchange", "reason": msg.get(58, ""), **report_fields(msg)}
+        if cl != order.cl_ord_id:
+            event["request_id"] = cl  # the report of a cancel carries the cancel request's ClOrdID
         self._update(
             order,
+            event,
             status=status,
             order_id=order_id if order_id and order_id != "NONE" else order.order_id,
             cum_qty=cum_qty,
@@ -280,13 +310,22 @@ class OrderEntryApp:
         if order is None:
             return
         log.info("cancel of %s rejected: %s", order.cl_ord_id, msg.get(58))
+        event = {
+            "event": "cancel_reject",
+            "by": "exchange",
+            "reason": msg.get(58, ""),
+            "reject_code": msg.get_int(102, 0) if msg.get(102) else None,  # CxlRejReason
+            "request_id": msg.get(11, ""),
+            "exchange_time": msg.get(60, ""),
+        }
         if msg.get(102) == "1":  # CxlRejReason 1 = unknown order: it is not live at the exchange
             self._before_cancel.pop(order.cl_ord_id, None)
-            self._update(order, status=Status.CANCELED, text=f"not at the exchange ({msg.get(58, 'unknown order')})")
+            text = f"not at the exchange ({msg.get(58, 'unknown order')})"
+            self._update(order, event, status=Status.CANCELED, text=text)
             return
         previous = self._before_cancel.pop(order.cl_ord_id, order.status)
         status = FROM_ORD_STATUS.get(msg.get(39, ""), previous)
-        self._update(order, status=status if status != Status.REJECTED else previous, text=msg.get(58, ""))
+        self._update(order, event, status=status if status != Status.REJECTED else previous, text=msg.get(58, ""))
 
     # ---- helpers ---------------------------------------------------------------------------
 
@@ -333,7 +372,7 @@ class OrderEntryApp:
                 (582, self.capacity),
                 (1028, "Y"),  # ManualOrderIndicator: entered by a person
             ],
-            header=[(50, self._exchange_trader(order.trader))],
+            header=[(50, order.exchange_user)],
         )
 
     def _limits_for(self, order: Order) -> tuple[RiskLimits | None, str]:
@@ -358,15 +397,16 @@ class OrderEntryApp:
     def _new_id(self) -> str:
         return f"{self._id_prefix}-{next(self._ids)}"
 
-    def _update(self, order: Order, **changes) -> None:
+    def _update(self, order: Order, event: dict, **changes) -> None:
         for key, value in changes.items():
             setattr(order, key, value)
         order.updated = now_iso()
         if not order.live:
             self._before_cancel.pop(order.cl_ord_id, None)
-        self._publish(order)
+        self._publish(order, event)
 
-    def _publish(self, order: Order) -> None:
+    def _publish(self, order: Order, event: dict) -> None:
+        """The order's new state, with the event that caused it (see orders.py)."""
         order.version += 1
         self.changes += 1
-        self.sink.publish(order.to_dict())
+        self.sink.publish({**order.to_dict(), "event_time": now_iso(), **event})

@@ -50,3 +50,40 @@ def test_orders_from_the_electronx_screen_and_fills_carry_the_electronx_user():
     assert (ours["source"], ours["exchange_user"]) == ("app", None)
     fill = {"exec_id": "E1", "symbol": "X", "side": "BUY", "qty": 1, "price": 1.0, "user": "u", "manual": True}
     assert (fill_row("3-0", fill)["exchange_user"], fill_row("3-0", fill)["manual"]) == ("u", True)
+
+
+def test_the_event_of_an_order_update():
+    update = {
+        "cl_ord_id": "T1-2",
+        "trader": "alice",
+        "symbol": "BFUT100-ERCOT-HB_TEST-261110-21",
+        "side": "BUY",
+        "qty": 1,
+        "price": 62.0,
+        "status": "filled",
+        "leaves": 0,
+        "event": "exchange_report",
+        "by": "exchange",
+        "reason": "",
+        "event_time": "2026-11-11T02:00:47.567+00:00",
+        "exec_id": "E7",
+        "exec_type": "F",
+        "exchange_time": "20261111-02:00:49.047894946",
+        "last_qty": 1,
+        "last_px": 61.25,
+        "leaves_qty": 0,
+        "trade_id": "TM1",
+        "aggressor": True,
+        "account": "TA-HURON-00001",
+        "capacity": "2",
+        "ord_type": "LIMIT",
+        "manual": True,
+    }
+    row = order_row("1-0", update)
+    assert (row["event"], row["by_user"], row["exec_type"], row["last_px"], row["trade_id"]) == (
+        "exchange_report", "exchange", "F", 61.25, "TM1"
+    )  # fmt: skip
+    assert row["exchange_time"] == datetime(2026, 11, 11, 2, 0, 49, 47894)
+    assert row["event_at"] == datetime(2026, 11, 11, 2, 0, 47, 567000) and row["reason"] is None
+    old = order_row("2-0", {k: update[k] for k in ("cl_ord_id", "trader", "symbol", "side", "qty", "price", "status")})
+    assert old["event"] is None and old["exec_id"] is None and old["manual"] is None  # from before step 20

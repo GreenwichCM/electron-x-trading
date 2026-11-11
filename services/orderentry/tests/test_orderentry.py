@@ -321,3 +321,68 @@ def test_an_order_loads_its_contract_from_redis():
         second = client.post("/orders", json=order, headers=headers).json()
         assert second["text"] == "not connected to the exchange"  # the contract was found; only the session is missing
         assert oe.instruments[SYMBOL].state == "OPEN"
+
+
+def test_every_update_says_what_happened_and_who_did_it():
+    async def scenario():
+        async with Harness() as h:
+            o = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)  # rests
+            await wait_for(lambda: h.sink.latest(o.cl_ord_id)["status"] == "new")
+            sent, ack = [u for u in h.sink.updates if u["cl_ord_id"] == o.cl_ord_id][:2]
+            assert (sent["event"], sent["by"], sent["status"]) == ("new_order", "alice", "pending_new")
+            assert (sent["account"], sent["capacity"], sent["exchange_user"], sent["ord_type"]) == (
+                "TA-TEST", "2", "trader@example.com", "LIMIT"
+            )  # fmt: skip
+            assert sent["event_time"] and sent["manual"] is True
+            assert (ack["event"], ack["by"], ack["exec_type"], ack["leaves_qty"]) == (
+                "exchange_report",
+                "exchange",
+                "0",
+                1,
+            )
+            assert ack["exec_id"] and ack["exchange_time"] and ack["last_qty"] is None
+            assert (ack["capacity"], ack["account"], ack["account_type"]) == (
+                "2",
+                "TA-TEST",
+                "1",
+            )  # not blanked by a report
+
+            with pytest.raises(OrderError):
+                h.oe.cancel("dave", o.cl_ord_id)  # not dave's: refused, and the attempt is on record
+            refused = h.sink.updates[-1]
+            assert (refused["event"], refused["by"], refused["reason"], refused["status"]) == (
+                "cancel_refused", "dave", "not your order", "new"
+            )  # fmt: skip
+
+            h.oe.cancel("alice", o.cl_ord_id)
+            await wait_for(lambda: h.sink.latest(o.cl_ord_id)["status"] == "canceled")
+            request, done = h.sink.updates[-2:]
+            assert (request["event"], request["by"], request["status"]) == ("cancel_request", "alice", "pending_cancel")
+            assert done["exec_type"] == "4" and done["request_id"] == request["request_id"] != o.cl_ord_id
+
+            price = h.best(OFFER)
+            f = h.oe.submit("alice", SYMBOL, "BUY", 1, price)  # takes the offer
+            await wait_for(lambda: h.sink.latest(f.cl_ord_id)["status"] == "filled")
+            fill = h.sink.latest(f.cl_ord_id)
+            assert (fill["exec_type"], fill["last_qty"], fill["last_px"], fill["aggressor"]) == ("F", 1, price, True)
+            assert fill["trade_id"] and fill["leaves_qty"] == 0
+
+            r = h.oe.submit("alice", SYMBOL, "BUY", 999, 40.0)  # over the order size limit: never sent
+            refused = h.sink.latest(r.cl_ord_id)
+            assert (refused["event"], refused["by"], refused["status"]) == ("refused", "alice", "rejected")
+            assert "limit" in refused["reason"]
+
+    run(scenario())
+
+
+def test_cancels_by_the_kill_switch_say_who_tripped_it_and_why():
+    async def scenario():
+        async with Harness() as h:
+            o = h.oe.submit("alice", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            await wait_for(lambda: h.sink.latest(o.cl_ord_id)["status"] == "new")
+            h.oe.set_kill_switch(KillSwitchState(active=True, reason="fat finger", by="bob", time="t"))
+            request = next(u for u in reversed(h.sink.updates) if u["event"] == "cancel_request")
+            assert (request["by"], request["reason"]) == ("bob", "kill switch: fat finger")
+            await wait_for(lambda: h.sink.latest(o.cl_ord_id)["status"] == "canceled")
+
+    run(scenario())

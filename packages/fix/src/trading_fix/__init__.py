@@ -2,6 +2,7 @@
 
 from .codec import FixMessage, FixParseError, FixParser, decode, encode
 from .lock import AlreadyRunning, lock_state_dir
+from .reports import report_fields
 from .session import FixSession, SessionApp, SessionConfig, SessionError, utc_timestamp
 from .store import SeqStore, fix_week_start
 from .tls import TlsConfig, build_ssl_context
@@ -17,6 +18,7 @@ __all__ = [
     "SessionConfig",
     "SessionError",
     "TlsConfig",
+    "report_fields",
     "build_ssl_context",
     "decode",
     "encode",

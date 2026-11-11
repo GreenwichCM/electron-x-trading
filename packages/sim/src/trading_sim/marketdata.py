@@ -90,6 +90,7 @@ class SimMarketData:
         self.on_fill: FillListener | None = None
         self.on_expire: ExpiryListener | None = None
         self.rng = random.Random(seed)
+        self.last_trade_id = ""
         self._ids = itertools.count(1)
         self._run = format(time.time_ns() // 1_000_000, "x")  # keeps ids unique across simulator restarts
         self._pending: dict[str, list[Fields]] = {}
@@ -159,6 +160,7 @@ class SimMarketData:
         else:
             self._entry(symbol, CHANGE, resting)
         trade_id = self.new_id("T")
+        self.last_trade_id = trade_id  # for the order entry side's reports (TrdMatchID)
         d, t = _now_parts()
         self._pending.setdefault(symbol, []).append(
             [

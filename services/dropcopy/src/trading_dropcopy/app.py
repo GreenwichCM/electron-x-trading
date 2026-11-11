@@ -3,7 +3,9 @@
 The drop copy carries every order of the account, whether it was sent by our orderentry or entered on
 the ElectronX screen, each with the trader's ElectronX id in TargetSubID(57). Fills build the exchange's
 positions; all reports together keep one record per exchange order (ExchangeOrder), so orders from the
-screen can be recorded too (see reconcile.py for how ours and theirs are told apart).
+screen can be recorded too (see reconcile.py for how ours and theirs are told apart). Each report on
+such an order becomes one event (`events`), the order's state just after it with the report's details,
+so its whole history is recorded, not only its latest state.
 """
 
 from __future__ import annotations
@@ -12,15 +14,17 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from trading_fix import FixMessage, FixSession
+from trading_fix import FixMessage, FixSession, report_fields
 
 from .journal import FillJournal
 
 log = logging.getLogger("dc")
 
 SIDES = {"1": "BUY", "2": "SELL"}
+USER_ACTIONS = {"0", "4", "5"}  # ExecType new, cancelled, replaced: done by the trader, unless restated
 TIFS = {"0": "DAY", "1": "GTC", "3": "IOC", "4": "FOK", "6": "GTD"}
 #: OrdStatus(39), in the words orderentry uses
 STATUSES = {
@@ -77,7 +81,10 @@ class ExchangeOrder:
     cl_ord_ids: set[str] = field(default_factory=set)
     first_seen: float = 0.0  # monotonic clock; 0 for orders rebuilt from the journal at startup
     version: int = 0  # +1 on every report
-    published: int = 0  # the version last published as an order from the screen
+    account: str = ""  # Account(1)
+    capacity: str = ""  # CustOrderCapacity(582)
+    events: list[dict[str, Any]] = field(default_factory=list)  # reports not published yet, in order
+    announced: bool = False  # logged as an order from the screen
 
     def to_dict(self) -> dict[str, Any]:
         """In the shape of orderentry's order updates, so the recorder can store both alike."""
@@ -97,6 +104,9 @@ class ExchangeOrder:
             "avg_px": self.avg_px,
             "text": self.text,
             "manual": self.manual,
+            "account": self.account,
+            "capacity": self.capacity,
+            "ord_type": "LIMIT",
             "created": self.created,
             "updated": self.updated,
             "version": self.version,
@@ -155,6 +165,9 @@ class DropCopyApp:
             "price": msg.get_float(31),
             "time": msg.get(60, ""),
         }
+        details = report_fields(msg)
+        fill.update({k: details[k] for k in ("trade_id", "aggressor", "commission", "leaves_qty")})
+        fill["capacity"] = msg.get(582, "")
         if self.journal is not None:
             self.journal.append(fill)
         self._apply(fill, first_seen=self.clock())
@@ -208,4 +221,17 @@ class DropCopyApp:
         order.manual = msg.get(1028) == "Y"
         order.updated = msg.get(60, "") or order.updated
         order.created = order.created or order.updated
+        order.account = msg.get(1, "") or order.account
+        order.capacity = msg.get(582, "") or order.capacity
         order.version += 1
+        user_action = msg.get(150) in USER_ACTIONS and not msg.get(378)
+        event = {
+            "event": "exchange_report",
+            "by": order.user if user_action else "exchange",
+            "reason": msg.get(58, ""),
+            "event_time": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            **report_fields(msg),
+        }
+        if msg.get(11, "") not in ("", order.cl_ord_id):
+            event["request_id"] = msg.get(11, "")  # an amend or cancel carries its own ClOrdID
+        order.events.append({**order.to_dict(), **event})

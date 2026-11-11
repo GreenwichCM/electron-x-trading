@@ -150,6 +150,9 @@ def test_orders_from_the_electronx_screen_are_followed_with_their_trader():
             h.exchange.screen_order("firms/h/users/dave", SYMBOL, "1", 2, price, tif="3")
             await wait_for(lambda: h.app.positions.get(SYMBOL) == 2)
             assert {f["user"] for f in h.sink.fills} == {"firms/h/users/dave"} and h.sink.fills[0]["manual"]
+            assert (
+                h.sink.fills[0]["trade_id"] and h.sink.fills[0]["aggressor"] is True
+            )  # TrdMatchID, AggressorIndicator
             await wait_for(lambda: next(iter(h.app.orders.values())).status == "filled")
             (screen,) = h.app.orders.values()
             assert (screen.user, screen.side, screen.qty, screen.filled) == ("firms/h/users/dave", "BUY", 2, 2)
@@ -185,5 +188,26 @@ def test_published_positions_are_split_as_of_the_moment_they_are_published():
         assert latest["screen"] == {SYMBOL: 2} and latest["pending"] == {}
         assert latest["screen_by_user"] == {"firms/h/users/dave": {SYMBOL: 2}}
         assert not sink.changed(reconciler.split(orders))
+
+    run(scenario())
+
+
+def test_every_report_on_a_screen_order_becomes_an_event():
+    async def scenario():
+        async with Harness() as h:
+            from trading_sim import BID
+
+            o = h.exchange.screen_order("firms/h/users/dave", SYMBOL, "1", 1, h.md.best(SYMBOL, BID) - 2.0)  # rests
+            h.exchange.screen_cancel(o.order_id)  # cancelled straight away, before anything is published
+            await wait_for(lambda: len(h.app.orders.get(o.order_id, ExchangeOrder("", "", "", "")).events) == 2)
+            new, cancelled = h.app.orders[o.order_id].events
+            assert (new["status"], new["exec_type"], new["by"], new["version"]) == ("new", "0", "firms/h/users/dave", 1)
+            assert (cancelled["status"], cancelled["exec_type"], cancelled["by"]) == (
+                "canceled",
+                "4",
+                "firms/h/users/dave",
+            )
+            assert new["exec_id"] != cancelled["exec_id"] and new["event"] == "exchange_report"
+            assert new["source"] == "electronx" and new["manual"] is True and new["leaves_qty"] == 1
 
     run(scenario())

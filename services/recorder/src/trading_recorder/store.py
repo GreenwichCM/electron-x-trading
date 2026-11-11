@@ -26,27 +26,45 @@ ORDER_VALUES = (
     "%(exchange_user)s"
 )
 
+# The event itself: what happened, who or what caused it, and the exchange's report (order_events only).
+EVENT_COLUMNS = (
+    "event, by_user, reason, event_at, request_id, exec_id, exec_type, exchange_time, last_qty, last_px, "
+    "leaves_qty, reject_code, restatement_reason, trade_id, aggressor, commission, account_type, account, capacity, "
+    "ord_type, manual"
+)
+EVENT_VALUES = ", ".join(f"%({c.strip()})s" for c in EVENT_COLUMNS.split(","))
+# What the latest state also keeps (orders only).
+STATE_COLUMNS = "account, capacity, ord_type, manual, leaves_qty, last_event"
+STATE_VALUES = "%(account)s, %(capacity)s, %(ord_type)s, %(manual)s, %(leaves_qty)s, %(event)s"
+
 INSERT_ORDER_EVENT = f"""
 IF NOT EXISTS (SELECT 1 FROM electronx.order_events WHERE stream_id = %(stream_id)s)
-    INSERT electronx.order_events (stream_id, {ORDER_COLUMNS}) VALUES (%(stream_id)s, {ORDER_VALUES});
+    INSERT electronx.order_events (stream_id, {ORDER_COLUMNS}, {EVENT_COLUMNS})
+    VALUES (%(stream_id)s, {ORDER_VALUES}, {EVENT_VALUES});
 """
 
 # The latest state wins by version; an equal version overwrites (updates from before step 10 are all 0).
 UPSERT_ORDER = f"""
 UPDATE electronx.orders SET
     version = %(version)s, status = %(status)s, order_id = %(order_id)s, cum_qty = %(cum_qty)s,
-    avg_px = %(avg_px)s, message = %(message)s, updated_at = %(updated_at)s, last_stream_id = %(stream_id)s
+    avg_px = %(avg_px)s, message = %(message)s, updated_at = %(updated_at)s, last_stream_id = %(stream_id)s,
+    leaves_qty = %(leaves_qty)s, last_event = %(event)s,
+    account = COALESCE(%(account)s, account), capacity = COALESCE(%(capacity)s, capacity),
+    ord_type = COALESCE(%(ord_type)s, ord_type), manual = COALESCE(%(manual)s, manual),
+    exchange_user = COALESCE(%(exchange_user)s, exchange_user)
 WHERE cl_ord_id = %(cl_ord_id)s AND version <= %(version)s;
 IF @@ROWCOUNT = 0 AND NOT EXISTS (SELECT 1 FROM electronx.orders WHERE cl_ord_id = %(cl_ord_id)s)
-    INSERT electronx.orders ({ORDER_COLUMNS}, last_stream_id) VALUES ({ORDER_VALUES}, %(stream_id)s);
+    INSERT electronx.orders ({ORDER_COLUMNS}, {STATE_COLUMNS}, last_stream_id)
+    VALUES ({ORDER_VALUES}, {STATE_VALUES}, %(stream_id)s);
 """
 
 INSERT_FILL = """
 IF NOT EXISTS (SELECT 1 FROM electronx.fills WHERE exec_id = %(exec_id)s)
     INSERT electronx.fills (exec_id, stream_id, order_id, cl_ord_id, account, symbol, side, qty, price, exec_time,
-                            exchange_user, manual)
+                            exchange_user, manual, trade_id, aggressor, commission, leaves_qty, capacity)
     VALUES (%(exec_id)s, %(stream_id)s, %(order_id)s, %(cl_ord_id)s, %(account)s, %(symbol)s, %(side)s,
-            %(qty)s, %(price)s, %(exec_time)s, %(exchange_user)s, %(manual)s);
+            %(qty)s, %(price)s, %(exec_time)s, %(exchange_user)s, %(manual)s, %(trade_id)s, %(aggressor)s,
+            %(commission)s, %(leaves_qty)s, %(capacity)s);
 """
 
 INSERT_ALERT = """
@@ -62,6 +80,9 @@ IF @@ROWCOUNT = 0 INSERT electronx.stream_offsets (stream, last_id) VALUES (%(st
 
 
 def write_order(conn: Connection, row: dict[str, Any]) -> None:
+    exchange_time = row.get("exchange_time")
+    if exchange_time is not None:  # as text: the driver would send a datetime to the millisecond only
+        row = {**row, "exchange_time": exchange_time.isoformat(timespec="microseconds")}
     cur = conn.cursor()
     cur.execute(INSERT_ORDER_EVENT, row)
     cur.execute(UPSERT_ORDER, row)

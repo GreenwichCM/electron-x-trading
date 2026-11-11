@@ -29,11 +29,15 @@ async def watch(
         await asyncio.sleep(every_s)
         split = reconciler.split(app.orders.values())
         for order in split.screen_orders:
-            if order.version > order.published:
-                if order.published == 0:
-                    log.info("order %s from the ElectronX screen, by %s: %s", order.order_id, order.user, order.symbol)
-                order.published = order.version
-                sink.screen_order(order.to_dict())
+            if order.events and not order.announced:
+                log.info("order %s from the ElectronX screen, by %s: %s", order.order_id, order.user, order.symbol)
+                order.announced = True
+            for event in order.events:  # every report, in order: the order's whole history
+                sink.screen_order(event)
+            order.events.clear()
+        for order in app.orders.values():
+            if order.events and reconciler.is_ours(order):
+                order.events.clear()  # orderentry records our own orders
         if sink.changed(split):
             sink.positions(app.positions, app.connected)
         if not app.connected:

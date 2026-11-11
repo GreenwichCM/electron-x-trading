@@ -143,6 +143,23 @@ by the `migrate` command above (`status` lists them).
 
 Fills come from drop copy and carry the ClOrdID, not the trader; the join with `electronx.orders` adds it.
 
+`electronx.orders` has one row per order, its latest state (what the blotter shows); `electronx.order_events`
+has a row for every change, so an order's whole life can be read back. Each event says:
+
+* what happened (`event`): `new_order`, `refused` (by our checks, never sent), `cancel_request`,
+  `cancel_refused` (not your order, already closed, not connected), `exchange_report`, `cancel_reject`,
+  `business_reject`
+* who or what caused it (`by_user`): the trader, the risk user who tripped the kill switch or blocked the
+  trader (or riskmonitor, dropcopy), orderentry after a restart, the trader on the ElectronX screen, or
+  `exchange`; why (`reason`); and when, here (`event_at`) and at the exchange (`exchange_time`)
+* the exchange's report: `exec_id`, `exec_type`, the fill (`last_qty`, `last_px`, `trade_id`, `aggressor`,
+  `commission`), `leaves_qty`, `reject_code`, `restatement_reason` (8 = cancelled on disconnect), and
+  `request_id`, the ClOrdID of the cancel request a report answers
+* what the order was sent with: `account`, `exchange_user` (SenderSubID), `capacity`, `ord_type`, `manual`
+
+    SELECT version, event, by_user, status, exec_type, last_qty, last_px, reason, event_at, exchange_time
+    FROM electronx.order_events WHERE cl_ord_id = '<ClOrdID>' ORDER BY version
+
 To use another SQL Server (for example a shared company database), point `DB_HOST`, `DB_PORT`,
 `DB_NAME`, `DB_USER` and `DB_PASSWORD` in `services/db.env` at it and run `migrate`. For a
 login that can reach only the `electronx` schema, give your DBA `packages/db/dba-setup.sql`.

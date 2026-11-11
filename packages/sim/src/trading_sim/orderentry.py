@@ -51,6 +51,7 @@ class ClientOrder:
     notional_ticks: int = 0
     status: str = NEW
     manual: bool = False  # ManualOrderIndicator(1028): entered by a person
+    capacity: str = "2"  # CustOrderCapacity(582)
 
     @property
     def leaves(self) -> int:
@@ -117,6 +118,7 @@ class SimOrderEntry:
             ticks=ticks,
             tif=tif,
             manual=msg.get(1028) == "Y",
+            capacity=msg.get(582) or "2",
         )
         self._enter(session, order, price, msg.get(40, ""))
 
@@ -140,6 +142,18 @@ class SimOrderEntry:
         self.md.flush()
         self._save()
         return order
+
+    def screen_cancel(self, order_id: str) -> None:
+        """The trader cancels an order of theirs on the ElectronX screen."""
+        order = self.orders[order_id]
+        if not order.leaves:
+            return
+        if order.order_id in self.md.books[order.symbol]:
+            self.md.cancel_order(order.symbol, order.order_id)
+        order.status = CANCELED
+        self._report(None, order, EXEC_CANCELED)
+        self.md.flush()
+        self._save()
 
     def _enter(self, session: SimSession | None, order: ClientOrder, price: float, ord_type: str) -> None:
         """Check a new order, then acknowledge it, match it and rest what is left."""
@@ -230,12 +244,12 @@ class SimOrderEntry:
             assert resting is not None
             qty = min(order.leaves, resting.qty)
             self.md.execute(order.symbol, resting, qty, order.side)
-            self._fill(order, qty, best)
+            self._fill(order, qty, best, aggressor=True)
 
     def _on_resting_fill(self, symbol: str, resting: RestingOrder, qty: int, ticks: int) -> None:
         order = self.orders.get(resting.order_id)
         if order is not None:
-            self._fill(order, qty, ticks)
+            self._fill(order, qty, ticks, aggressor=False)
             self._save()
 
     def _on_expire(self, symbol: str, resting: RestingOrder) -> None:
@@ -246,12 +260,12 @@ class SimOrderEntry:
         self._report(self.gateway.sessions.get(order.sender), order, EXEC_CANCELED, text="Instrument expired")
         self._save()
 
-    def _fill(self, order: ClientOrder, qty: int, ticks: int) -> None:
+    def _fill(self, order: ClientOrder, qty: int, ticks: int, aggressor: bool) -> None:
         order.cum_qty += qty
         order.notional_ticks += qty * ticks
         order.status = FILLED if order.cum_qty == order.qty else PARTIAL
         session = self.gateway.sessions.get(order.sender)  # None for an order from the screen
-        self._report(session, order, EXEC_TRADE, last_qty=qty, last_ticks=ticks)
+        self._report(session, order, EXEC_TRADE, last_qty=qty, last_ticks=ticks, aggressor=aggressor)
 
     # ---- reports ---------------------------------------------------------------------------
 
@@ -265,6 +279,7 @@ class SimOrderEntry:
         last_ticks: int | None = None,
         cl_ord_id: str | None = None,
         orig_cl_ord_id: str | None = None,
+        aggressor: bool | None = None,
     ) -> None:
         sym = order.symbol
         inst = self.md.instruments.get(sym)
@@ -288,11 +303,14 @@ class SimOrderEntry:
             (6, f"{avg:.4f}"),
             (60, utc_timestamp()),
             (1028, "Y" if order.manual else "N"),
+            (581, "1"),  # AccountType: customer, as on the connectivity sheet
+            (582, order.capacity),  # CustOrderCapacity, echoed
         ]
         if orig_cl_ord_id:
             body.append((41, orig_cl_ord_id))
         if last_ticks is not None:
             body += [(31, f"{last_ticks * tick:.2f}"), (32, str(last_qty))]
+            body += [(880, self.md.last_trade_id), (1057, "Y" if aggressor else "N")]  # TrdMatchID, AggressorIndicator
         if text:
             body.append((58, text))
         if session is not None:

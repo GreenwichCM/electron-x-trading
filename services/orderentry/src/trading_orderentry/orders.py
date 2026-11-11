@@ -1,4 +1,15 @@
-"""Our record of each order, kept up to date from the exchange's ExecutionReports."""
+"""Our record of each order, kept up to date from the exchange's ExecutionReports.
+
+Every change is published as the order's new state plus the event that caused it (OrderEntryApp):
+  event               new_order, refused (by our checks, never sent), cancel_request, cancel_refused (by
+                      us: not your order, already closed, ...), exchange_report, cancel_reject,
+                      business_reject
+  by                  who or what caused it: the trader's user id, the risk user who tripped the kill switch
+                      or blocked the trader (or riskmonitor, dropcopy), orderentry itself, or "exchange"
+  reason, event_time  why (a reject or refusal, the kill switch's reason, ...), and when it happened here
+  request_id          the ClOrdID of the cancel request an event belongs to
+and, for exchange reports, the fields of trading_fix.report_fields (ExecID, ExecType, the fill, ...).
+"""
 
 from __future__ import annotations
 
@@ -57,6 +68,11 @@ class Order:
     created: str = field(default_factory=now_iso)
     updated: str = field(default_factory=now_iso)
     version: int = 0  # +1 on every published update, so an older copy never overwrites a newer one
+    account: str = ""  # Account(1) it was sent with
+    exchange_user: str = ""  # SenderSubID(50) it was sent with: the trader's ElectronX id
+    capacity: str = ""  # CustOrderCapacity(582)
+    ord_type: str = "LIMIT"  # OrdType(40): limit orders only
+    manual: bool = True  # ManualOrderIndicator(1028): entered by a person
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Order:

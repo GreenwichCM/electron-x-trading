@@ -1,6 +1,7 @@
 """The simulator's full universe: every hour of today and tomorrow, rolling on as days go by."""
 
 import random
+import time
 from datetime import UTC, datetime
 
 from trading_core import Symbol
@@ -42,7 +43,8 @@ def test_roll_lists_new_days_and_delists_settled_contracts():
 
 
 def test_with_thousands_of_contracts_only_some_move_each_step():
-    md = SimMarketData(SimGateway({}), full_universe(NOW, random.Random(3)), seed=3)
+    # now, not NOW: step() expires contracts by the real clock
+    md = SimMarketData(SimGateway({}), full_universe(time.time(), random.Random(3)), seed=3)
     md.active_per_step = 10
     before = {s: dict(book) for s, book in md.books.items()}
     md.step()

@@ -196,3 +196,39 @@ def test_orders_from_the_electronx_screen_are_recorded_with_their_trader(sql_ser
         ("UI-2", "", "electronx", "firms/h/users/nobody"),  # no trader has that ElectronX id
     ]
     assert query(sql_server, "SELECT exchange_user, manual FROM electronx.fills") == [("firms/h/users/dave", True)]
+
+
+def test_the_whole_event_is_recorded(sql_server):
+    migrate(sql_server)
+    r = FakeRedis()
+    sent = {"account": "TA-1", "capacity": "2", "ord_type": "LIMIT", "manual": True, "exchange_user": "a@x.com"}
+    add(
+        r,
+        "orders",
+        {**order("A", 1), **sent, "event": "new_order", "by": "alice", "event_time": "2026-11-11T02:00:40Z"},
+    )
+    ack = {"event": "exchange_report", "by": "exchange", "exec_id": "X1", "exec_type": "0", "leaves_qty": 3}
+    add(r, "orders", {**order("A", 2), **sent, **ack, "exchange_time": "20261111-02:00:40.394123456"})
+    refused = {"event": "cancel_refused", "by": "dave", "reason": "not your order"}
+    add(r, "orders", {**order("A", 3), **sent, **refused})
+    trade = {"trade_id": "TM1", "aggressor": False, "commission": 0.5, "leaves_qty": 2, "capacity": "2"}
+    add(r, "fills", {**fill("E1", "A", 1), **trade})
+    assert drain(make_recorder(r, sql_server)) == 4
+    rows = query(
+        sql_server,
+        "SELECT version, event, by_user, reason, exec_id, exec_type, leaves_qty, account, manual "
+        "FROM electronx.order_events ORDER BY version",
+    )
+    assert rows == [
+        (1, "new_order", "alice", None, None, None, 3, "TA-1", True),
+        (2, "exchange_report", "exchange", None, "X1", "0", 3, "TA-1", True),
+        (3, "cancel_refused", "dave", "not your order", None, None, 3, "TA-1", True),
+    ]
+    exchange_time = query(sql_server, "SELECT exchange_time FROM electronx.order_events WHERE version = 2")[0][0]
+    assert exchange_time.isoformat() == "2026-11-11T02:00:40.394123"
+    assert query(sql_server, "SELECT last_event, leaves_qty, account, exchange_user FROM electronx.orders") == [
+        ("cancel_refused", 3, "TA-1", "a@x.com")
+    ]
+    assert query(sql_server, "SELECT trade_id, aggressor, commission, leaves_qty FROM electronx.fills") == [
+        ("TM1", False, 0.5, 2)
+    ]
