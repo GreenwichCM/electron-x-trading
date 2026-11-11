@@ -1,5 +1,5 @@
 main {
-  max-width: 1280px;
+  max-width: 1480px;
 }
 
 .workspace {
@@ -134,6 +134,14 @@ h2 {
   border-color: var(--ask);
 }
 
+.pill.source {
+  margin-left: 8px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  background: transparent;
+}
+
+/* ---- the price screen ---- */
 .board {
   min-width: 0;
 }
@@ -141,23 +149,40 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 8px 14px;
-  margin-bottom: 10px;
+  gap: 8px 12px;
+  margin-bottom: 8px;
 }
-.filters label {
+.filters label,
+.toolbar label {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
   color: var(--muted);
 }
-.filters label.check {
+.filters label.grow {
+  flex: 1 1 160px;
+}
+.filters .pair {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.filters .checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  width: 100%;
+}
+label.check {
   flex-direction: row;
   align-items: center;
   gap: 6px;
-  padding-bottom: 6px;
 }
-.filters select {
+.filters select,
+.filters input[type="search"],
+.toolbar select {
   font: inherit;
   font-size: 13px;
   color: var(--text);
@@ -166,16 +191,235 @@ h2 {
   border-radius: 6px;
   padding: 5px 8px;
 }
-.filters .count {
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 8px;
+}
+.toolbar .count {
   margin-left: auto;
-  padding-bottom: 6px;
   font-size: 12px;
   color: var(--muted);
 }
-
-.pill.source {
-  margin-left: 8px;
-  color: var(--muted);
+.segmented {
+  display: inline-flex;
   border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.segmented button {
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
   background: transparent;
+  border: none;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.segmented button.active {
+  color: var(--text);
+  background: var(--line);
+}
+details.menu {
+  position: relative;
+  font-size: 13px;
+}
+details.menu summary {
+  cursor: pointer;
+  color: var(--muted);
+  list-style: none;
+}
+details.menu summary::after {
+  content: " ▾";
+}
+details.menu .menu-body {
+  position: absolute;
+  z-index: 5;
+  top: 24px;
+  left: 0;
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  min-width: 180px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.statuses .closed {
+  color: #e3b341;
+}
+.board-scroll {
+  max-height: 70vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.prices thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+}
+.prices tbody tr {
+  content-visibility: auto; /* rows out of view are not drawn */
+  contain-intrinsic-size: auto 37px;
+  cursor: pointer;
+}
+.prices tr.selected td {
+  background: rgba(138, 150, 168, 0.12);
+}
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+th.sortable:hover {
+  color: var(--text);
+}
+.state {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.state-open {
+  color: var(--bid);
+  border-color: var(--bid);
+}
+.state-closed,
+.state-halted,
+.state-suspended,
+.state-pending {
+  color: #e3b341;
+  border-color: #e3b341;
+}
+.state-settled,
+.state-expired,
+.state-ended,
+.state-terminated {
+  color: var(--muted);
+}
+.strip td.cell {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+  white-space: nowrap;
+}
+.strip td.cell .bid {
+  color: var(--bid);
+}
+.strip td.cell .ask {
+  color: var(--ask);
+}
+.strip td.cell .sep {
+  color: var(--muted);
+  margin: 0 4px;
+}
+.strip td.cell .clickable {
+  cursor: pointer;
+}
+.strip td.cell .clickable:hover {
+  text-decoration: underline;
+}
+.strip td.cell .pos {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+}
+.strip td.cell.selected {
+  outline: 1px solid var(--muted);
+  outline-offset: -1px;
+}
+
+/* ---- order ticket and order book ---- */
+.side-panel {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+.ticket .facts-line {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ticket .quick {
+  display: flex;
+  gap: 12px;
+  margin-top: -4px;
+  font-size: 12px;
+}
+.ticket .problems {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--ask);
+}
+.ticket .submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ladder {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+}
+.ladder h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ladder-symbol {
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.ladder table {
+  font-size: 13px;
+}
+.ladder th,
+.ladder td {
+  padding: 4px 6px;
+}
+.ladder td.depth {
+  position: relative;
+}
+.ladder .depth-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  opacity: 0.18;
+}
+.ladder .depth-bar.bid {
+  right: 0;
+  background: var(--bid);
+}
+.ladder .depth-bar.ask {
+  left: 0;
+  background: var(--ask);
+}
+.ladder .facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+.ladder .facts dt {
+  color: var(--muted);
+}
+.ladder .facts dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
 }

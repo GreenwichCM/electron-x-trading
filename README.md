@@ -45,9 +45,24 @@ To run only some: `uv run honcho start sim marketdata`.
 By default the simulator lists three contracts that never expire. `SIM_UNIVERSE=full uv run honcho start`
 lists what the exchange does instead: every hour of today and tomorrow for each ERCOT hub and PJM Western
 Hub, in BFUT100, BFUT500, BFUT5000 and BOPT (about 1,800 contracts), each stopping trading when its hour
-begins and settling after it ends, with new days listed as they come. The price screen has filters for
-market, hub, product and delivery day, and shows at most 200 contracts; the browser gets live prices only
-for the contracts on its screen. Each user's filters are remembered in their browser.
+begins and settling after it ends, with new days listed as they come.
+
+The price screen shows at most 200 contracts, and the browser gets live prices only for those:
+
+* Filters: market, hub, BFUT or BOPT, product size, delivery day, hours ending, peak or off-peak (weekdays,
+  HE07-22 Central and Pacific, HE08-23 Eastern; holidays not taken out), closing within, only with prices
+  (a bid and an offer now), my contracts (a position or a working order), hide ended (expired, settled),
+  and a search ("north 18").
+* Each row shows its state: OPEN, CLOSED, HALTED, ENDED, SETTLED, or NO DATA when no live book has arrived.
+  A line per market says how many contracts are open, closed or not reported yet, so a closed market reads
+  as closed.
+* Columns can be chosen (spread, mid, last trade time, closes in, day-ahead, settlement, position, working
+  orders) and the rows shown sorted by clicking a header. The strip view shows one market, day and product
+  as hours down and hubs across.
+* Clicking a price fills in the order ticket; clicking a row shows its order book, every level, where a
+  click on a price does the same. The ticket checks the contract's tick size, lot size, price limits and
+  state before sending.
+* Filters, columns, layout and sort are remembered per user in their browser, and can be saved as named views.
 
 Marketdata subscribes at the exchange in order of interest, as trading platforms do: first the contracts
 on someone's screen (the api tells it through Redis, `md:wanted:*`), then those the account holds, then

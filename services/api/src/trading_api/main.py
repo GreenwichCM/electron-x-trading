@@ -86,6 +86,7 @@ def create_app(
             asyncio.create_task(app.state.orders.run(), name="order-hub"),
             asyncio.create_task(app.state.hub.publish_wanted(), name="wanted"),
             asyncio.create_task(app.state.hub.refresh_instruments(), name="instruments"),
+            asyncio.create_task(app.state.hub.load_quotes(), name="quotes"),
         ]
         if settings.db is not None:  # who each ElectronX id belongs to, for orders from the ElectronX screen
             rules = follow_rules(settings.db, app.state.orders.set_rules, settings.rules_refresh_s, appname="api")
@@ -174,9 +175,14 @@ def create_app(
             return Response(status_code=304, headers=headers)
         return Response(content=data, media_type="application/json", headers=headers)
 
+    @app.get("/api/md/summary")
+    async def md_summary(user: Annotated[User, Depends(require("md.view"))]) -> dict[str, Any]:
+        """Which contracts have a bid and an offer right now (for "only with prices" on the price screen)."""
+        return {"two_sided": sorted(app.state.hub.two_sided)}
+
     @app.get("/api/md/{symbol}")
     async def latest_book(symbol: str, user: Annotated[User, Depends(require("md.view"))]) -> dict[str, Any]:
-        book = (await app.state.hub.latest()).get(symbol)
+        book = (await app.state.hub.latest_for({symbol})).get(symbol)
         if book is None:
             raise HTTPException(status_code=404, detail=f"no market data for {symbol}")
         return book

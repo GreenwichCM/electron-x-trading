@@ -21,6 +21,8 @@ export type Book = {
   asks: [number, number][];
   last_trade: Trade | null;
   state?: string; // OPEN, EXPIRED, ...
+  settlement?: { price: number; final: boolean; flag?: string; time?: string } | null;
+  marks?: { dam?: { price: number; time: string } } | null; // the exchange's day-ahead price (Snapshot API)
   time: string;
 };
 

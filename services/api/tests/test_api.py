@@ -75,7 +75,16 @@ def test_instruments_and_latest_book():
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book(40.0, 40.5)))
         client.portal.call(app.state.hub.load_instruments)  # every 30 s in the background
         assert client.get("/api/instruments", headers=headers).json() == [
-            {"symbol": SYMBOL, "state": None, "last_trade_time": None}  # only what the price screen needs
+            {
+                "symbol": SYMBOL,
+                "state": None,
+                "last_trade_time": None,
+                "expiration_time": None,
+                "tick_size": 0.25,
+                "lot_size": None,
+                "low_limit": None,
+                "high_limit": None,
+            }  # only what the price screen and order ticket need
         ]
         assert client.get(f"/api/md/{SYMBOL}", headers=headers).json()["bid"] == 40.0
         assert client.get("/api/md/NOPE", headers=headers).status_code == 404
@@ -197,3 +206,37 @@ def test_an_empty_instrument_list_still_has_an_etag():
             client.get("/api/instruments", headers={**headers, "If-None-Match": first.headers["etag"]}).status_code
             == 304
         )
+
+
+def test_which_books_are_two_sided():
+    redis, app = make_app()
+    other = "BFUT500-ERCOT-HB_NORTH-261231-16"
+    with TestClient(app) as client:
+        _, headers = login(client)
+        client.portal.call(app.state.hub.ready.wait)
+
+        def two_sided(expected):
+            for _ in range(100):
+                found = client.get("/api/md/summary", headers=headers).json()["two_sided"]
+                if found == expected:
+                    return True
+                client.portal.call(asyncio.sleep, 0.02)
+            return False
+
+        client.portal.call(redis.publish, f"md.{SYMBOL}", json.dumps(book(40.0, 40.5)))
+        client.portal.call(redis.publish, f"md.{other}", json.dumps(book(41.0, None, other)))  # no offer
+        assert two_sided([SYMBOL])
+        client.portal.call(redis.publish, f"md.{SYMBOL}", json.dumps({**book(40.0, 40.5), "stale": True}))
+        assert two_sided([])  # stale: not live
+        assert client.get(f"/api/md/{SYMBOL}", headers=headers).status_code == 404  # never in md:last here
+
+
+def test_the_instrument_list_has_what_the_order_ticket_needs():
+    redis, app = make_app()
+    with TestClient(app) as client:
+        _, headers = login(client)
+        listed = {"symbol": SYMBOL, "tick_size": 0.25, "lot_size": 1, "low_limit": 0.0, "high_limit": 500.0}
+        client.portal.call(redis.set, f"instrument:{SYMBOL}", json.dumps({**listed, "expiration_time": "t", "x": 1}))
+        client.portal.call(app.state.hub.load_instruments)
+        (row,) = client.get("/api/instruments", headers=headers).json()
+        assert row == {**listed, "state": None, "last_trade_time": None, "expiration_time": "t"}

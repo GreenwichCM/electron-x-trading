@@ -23,8 +23,17 @@ log = logging.getLogger("api.hub")
 Payload = dict[str, Any]
 WANTED_KEY = "md:wanted"  # a hash marketdata reads in one call: one field per api process
 WANTED_FIELD = f"{socket.gethostname()}-{os.getpid()}"
-#: What the price screen needs of each instrument; the rest stays in Redis.
-INSTRUMENT_FIELDS = ("symbol", "state", "last_trade_time")
+#: What the price screen and the order ticket need of each instrument.
+INSTRUMENT_FIELDS = (
+    "symbol",
+    "state",
+    "last_trade_time",
+    "expiration_time",
+    "tick_size",
+    "lot_size",
+    "low_limit",
+    "high_limit",
+)
 
 
 class ClientFeed:
@@ -70,6 +79,7 @@ class MarketDataHub:
         self.redis = redis
         self.clients: set[ClientFeed] = set()
         self.ready = asyncio.Event()  # set once the Redis subscription is active
+        self.two_sided: set[str] = set()  # symbols whose live book has a bid and an offer
         self.instrument_list = b""  # JSON of every instrument, INSTRUMENT_FIELDS only
         self.instrument_etag = ""
         self.instrument_count = 0
@@ -95,6 +105,7 @@ class MarketDataHub:
                         if msg["type"] != "pmessage":
                             continue
                         payload = json.loads(msg["data"])
+                        self._note_quotes(payload)
                         for feed in self.clients:
                             feed.put(payload["symbol"], payload)
             except (RedisError, OSError) as exc:
@@ -159,6 +170,17 @@ class MarketDataHub:
         if not self._instruments_loaded.is_set():
             await self.load_instruments()
         return self.instrument_list, self.instrument_etag
+
+    def _note_quotes(self, book: Payload) -> None:
+        if book.get("bid") is not None and book.get("ask") is not None and not book.get("stale"):
+            self.two_sided.add(book["symbol"])
+        else:
+            self.two_sided.discard(book["symbol"])
+
+    async def load_quotes(self) -> None:
+        """Which books are two-sided now, from md:last (once at startup; then every update keeps it)."""
+        for book in (await self.latest()).values():
+            self._note_quotes(book)
 
     async def latest(self) -> dict[str, Payload]:
         """The last book for every symbol, from the md:last:<symbol> keys."""
