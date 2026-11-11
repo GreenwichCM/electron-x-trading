@@ -7,6 +7,7 @@ import json
 import logging
 import signal
 import sys
+import time
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -19,7 +20,8 @@ from .snapshot import SnapshotClient, poll_snapshots
 
 log = logging.getLogger("md")
 
-WANTED_PREFIX = "md:wanted:"  # one key per api process: the contracts its browsers show (a JSON list)
+WANTED_KEY = "md:wanted"  # a hash, one field per api process: {"symbols": [...], "time": seconds}
+WANTED_MAX_AGE_S = 90  # an api process that stopped without saying so is forgotten after this
 POSITIONS_KEY = "dc:positions"  # dropcopy: the account's positions at the exchange
 
 
@@ -35,11 +37,11 @@ async def follow_interest(redis: Redis, app: MarketDataApp, every_s: float = 1.0
     """Contracts on someone's screen and contracts the account holds, for the order of subscriptions."""
     while True:
         try:
-            keys = [k async for k in redis.scan_iter(match=f"{WANTED_PREFIX}*")]
             on_screen: set[str] = set()
-            for value in await redis.mget(keys) if keys else []:
-                if value:
-                    on_screen.update(json.loads(value))
+            for value in (await redis.hgetall(WANTED_KEY)).values():
+                entry = json.loads(value)
+                if time.time() - float(entry.get("time", 0)) < WANTED_MAX_AGE_S:
+                    on_screen.update(entry.get("symbols", ()))
             raw = await redis.get(POSITIONS_KEY)
             held = {s for s, qty in (json.loads(raw) if raw else {}).get("positions", {}).items() if qty}
             app.set_interest(on_screen, held)

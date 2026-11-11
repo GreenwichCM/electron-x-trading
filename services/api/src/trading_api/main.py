@@ -94,6 +94,7 @@ def create_app(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await app.state.hub.forget_wanted()
         if orderentry is None:
             await oe.aclose()
         if redis is None:

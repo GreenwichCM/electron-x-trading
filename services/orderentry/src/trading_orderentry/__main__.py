@@ -59,7 +59,7 @@ async def refresh_instruments(redis: Redis, oe: OrderEntryApp, every_s: float = 
     order also reloads its own contract (instrument_loader); this full reload is only a fallback."""
     while True:
         try:
-            keys = [k async for k in redis.scan_iter(match="instrument:*")]
+            keys = [k async for k in redis.scan_iter(match="instrument:*", count=1000)]
             for value in await redis.mget(keys) if keys else []:
                 if value is not None:
                     inst = Instrument.from_dict(json.loads(value))

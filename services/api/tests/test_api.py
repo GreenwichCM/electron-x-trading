@@ -1,6 +1,7 @@
 """The api against fakeredis. TestClient runs the app in its own event loop; `portal.call` runs a
 coroutine inside that loop, which is how the tests write to Redis while the app is running."""
 
+import asyncio
 import json
 
 import pytest
@@ -172,14 +173,18 @@ def test_marketdata_is_told_what_the_browsers_show():
                 assert ws.receive_json()["type"] == "welcome"
             a.send_json({"type": "watch", "symbols": [SYMBOL]})
             b.send_json({"type": "watch", "symbols": [SYMBOL, other]})
-            key = next(iter(client.portal.call(redis.keys, "md:wanted:*")), None)
+
+            def wanted():
+                values = client.portal.call(redis.hvals, "md:wanted")
+                return json.loads(values[0]) if values else {"symbols": []}
+
             for _ in range(100):
-                key = next(iter(client.portal.call(redis.keys, "md:wanted:*")), None)
-                if key and len(json.loads(client.portal.call(redis.get, key))) == 2:
+                if len(wanted()["symbols"]) == 2:
                     break
-                client.portal.call(__import__("asyncio").sleep, 0.05)
-            assert json.loads(client.portal.call(redis.get, key)) == sorted([SYMBOL, other])
-            assert 0 < client.portal.call(redis.ttl, key) <= 90  # gone soon if this api stops
+                client.portal.call(asyncio.sleep, 0.05)
+            assert wanted()["symbols"] == sorted([SYMBOL, other])
+        assert client.portal.call(redis.hlen, "md:wanted") == 1
+    assert asyncio.run(redis.hlen("md:wanted")) == 0  # on shutdown the api removed its own entry
 
 
 def test_an_empty_instrument_list_still_has_an_etag():

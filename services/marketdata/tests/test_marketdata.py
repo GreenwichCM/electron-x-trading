@@ -1,6 +1,7 @@
 """MarketDataApp against the simulated MD gateway, over real TCP on 127.0.0.1."""
 
 import asyncio
+import json
 import time
 from datetime import UTC, datetime
 
@@ -238,5 +239,34 @@ def test_contracts_whose_trading_ended_are_not_subscribed_in_the_background():
             assert next(iter(h.app.subscribed)) == soon.symbol  # the soonest to stop trading comes first
             h.app.set_interest({ended.symbol}, ())  # someone looks at it anyway
             await wait_for(lambda: h.live(ended.symbol))
+
+    run(scenario())
+
+
+def test_interest_is_read_in_one_call_and_entries_of_stopped_apis_are_ignored():
+    async def scenario():
+        from fakeredis import FakeAsyncRedis
+        from trading_marketdata.__main__ import follow_interest
+
+        r = FakeAsyncRedis()
+        now = time.time()
+        await r.hset(
+            "md:wanted",
+            mapping={
+                "api-1": json.dumps({"symbols": ["A", "B"], "time": now}),
+                "stopped": json.dumps({"symbols": ["Z"], "time": now - 300}),  # did not clean up after itself
+            },
+        )
+        await r.set("dc:positions", json.dumps({"positions": {"C": 2, "D": 0}}))
+        seen = []
+
+        class App:
+            def set_interest(self, on_screen, held):
+                seen.append((set(on_screen), set(held)))
+
+        task = asyncio.create_task(follow_interest(r, App(), every_s=0.01))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        assert seen[0] == ({"A", "B"}, {"C"})
 
     run(scenario())

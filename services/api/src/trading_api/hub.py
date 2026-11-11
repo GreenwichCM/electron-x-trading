@@ -21,8 +21,8 @@ from redis.exceptions import RedisError
 log = logging.getLogger("api.hub")
 
 Payload = dict[str, Any]
-WANTED_KEY = f"md:wanted:{socket.gethostname()}-{os.getpid()}"  # one per api process; marketdata reads them all
-WANTED_TTL_S = 90  # gone soon after this process stops
+WANTED_KEY = "md:wanted"  # a hash marketdata reads in one call: one field per api process
+WANTED_FIELD = f"{socket.gethostname()}-{os.getpid()}"
 #: What the price screen needs of each instrument; the rest stays in Redis.
 INSTRUMENT_FIELDS = ("symbol", "state", "last_trade_time")
 
@@ -120,11 +120,19 @@ class MarketDataHub:
             wanted = self.wanted()
             if wanted == last and time.monotonic() - written < refresh_s:
                 continue
+            entry = json.dumps({"symbols": sorted(wanted), "time": time.time()})
             try:
-                await self.redis.set(WANTED_KEY, json.dumps(sorted(wanted)), ex=WANTED_TTL_S)
+                await self.redis.hset(WANTED_KEY, WANTED_FIELD, entry)
                 last, written = wanted, time.monotonic()
             except (RedisError, OSError) as exc:
                 log.warning("could not tell marketdata what is on screen: %s", exc)
+
+    async def forget_wanted(self) -> None:
+        """On shutdown: this process shows nothing any more (marketdata would forget it after 90 s anyway)."""
+        try:
+            await self.redis.hdel(WANTED_KEY, WANTED_FIELD)
+        except RedisError, OSError:
+            pass
 
     async def refresh_instruments(self, every_s: float = 30.0, while_empty_s: float = 2.0) -> None:
         """Reload the instrument list from Redis now and every `every_s` (every `while_empty_s` while there
@@ -166,7 +174,7 @@ class MarketDataHub:
         return await self._read_prefix("instrument:")
 
     async def _read_prefix(self, prefix: str) -> dict[str, Payload]:
-        keys = [k async for k in self.redis.scan_iter(match=f"{prefix}*")]
+        keys = [k async for k in self.redis.scan_iter(match=f"{prefix}*", count=1000)]
         if not keys:
             return {}
         values = await self.redis.mget(keys)

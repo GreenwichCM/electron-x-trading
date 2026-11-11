@@ -72,7 +72,7 @@ async def follow_streams(redis: Redis, engine: RiskEngine) -> None:
 
 
 async def _load_prefix(redis: Redis, prefix: str) -> list[dict[str, Any]]:
-    keys = [k async for k in redis.scan_iter(match=f"{prefix}*")]
+    keys = [k async for k in redis.scan_iter(match=f"{prefix}*", count=1000)]
     return [json.loads(v) for v in (await redis.mget(keys) if keys else []) if v is not None]
 
 
