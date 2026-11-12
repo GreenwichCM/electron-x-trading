@@ -4,6 +4,7 @@ Redis layout:
   * PUBLISH md.<symbol>        every book update (JSON), for live subscribers
   * SET     md:last:<symbol>   the latest book update, so a service that starts later has a value at once
   * SET     instrument:<symbol> reference data (tick size, lot size, limits, last trade and expiration times)
+  * XADD    md:trades           every trade on the exchange, in order (time & sales), the last TRADES_KEPT
 A retired contract's two keys expire after RETIRED_TTL_S, so riskmonitor keeps its settlement for a while.
 """
 
@@ -21,12 +22,15 @@ log = logging.getLogger("md.publisher")
 
 Payload = dict[str, Any]
 RETIRED_TTL_S = 30 * 24 * 3600
+TRADES_STREAM = "md:trades"
+TRADES_KEPT = 100_000  # about two days of a busy exchange
 
 
 class Publisher(Protocol):
     def book(self, symbol: str, payload: Payload) -> None: ...
     def instrument(self, symbol: str, payload: Payload) -> None: ...
     def retire(self, symbol: str) -> None: ...
+    def trade(self, payload: Payload) -> None: ...
 
 
 class MemoryPublisher:
@@ -37,6 +41,7 @@ class MemoryPublisher:
         self.book_updates: list[Payload] = []
         self.instruments: dict[str, Payload] = {}
         self.retired: list[str] = []
+        self.trades: list[Payload] = []
 
     def book(self, symbol: str, payload: Payload) -> None:
         self.books[symbol] = payload
@@ -48,12 +53,16 @@ class MemoryPublisher:
     def retire(self, symbol: str) -> None:
         self.retired.append(symbol)
 
+    def trade(self, payload: Payload) -> None:
+        self.trades.append(payload)
+
 
 class RedisPublisher:
     """Writes to Redis from a background task, so the FIX session never waits on Redis.
 
     Only the newest pending update per symbol is kept ("conflation"): if Redis is slow or briefly down,
-    a busy symbol sends its latest state once instead of building a backlog of stale ones.
+    a busy symbol sends its latest state once instead of building a backlog of stale ones. Trades are
+    never conflated: each one is a line on the time & sales.
     """
 
     RETRY_S = 1.0
@@ -63,6 +72,7 @@ class RedisPublisher:
         self._books: dict[str, Payload] = {}
         self._instruments: dict[str, Payload] = {}
         self._retired: set[str] = set()
+        self._trades: list[Payload] = []
         self._wake = asyncio.Event()
         self._closed = False
 
@@ -78,13 +88,17 @@ class RedisPublisher:
         self._retired.add(symbol)
         self._wake.set()
 
+    def trade(self, payload: Payload) -> None:
+        self._trades.append(payload)
+        self._wake.set()
+
     async def run(self) -> None:
         """Publish until close(); call as a task."""
         while True:
             await self._wake.wait()
             self._wake.clear()
             await self._flush()
-            if self._closed and not self._books and not self._instruments and not self._retired:
+            if self._closed and not (self._books or self._instruments or self._retired or self._trades):
                 return
 
     async def close(self) -> None:
@@ -96,7 +110,8 @@ class RedisPublisher:
         books, self._books = self._books, {}
         instruments, self._instruments = self._instruments, {}
         retired, self._retired = self._retired, set()
-        if not books and not instruments and not retired:
+        trades, self._trades = self._trades, []
+        if not books and not instruments and not retired and not trades:
             return
         try:
             async with self.redis.pipeline(transaction=False) as pipe:
@@ -106,6 +121,8 @@ class RedisPublisher:
                     data = json.dumps(payload)
                     pipe.set(f"md:last:{symbol}", data)
                     pipe.publish(f"md.{symbol}", data)
+                for payload in trades:
+                    pipe.xadd(TRADES_STREAM, {"data": json.dumps(payload)}, maxlen=TRADES_KEPT, approximate=True)
                 for symbol in retired:  # after any last update above
                     pipe.expire(f"md:last:{symbol}", RETIRED_TTL_S)
                     pipe.expire(f"instrument:{symbol}", RETIRED_TTL_S)
@@ -120,5 +137,6 @@ class RedisPublisher:
             for symbol, payload in instruments.items():
                 self._instruments.setdefault(symbol, payload)
             self._retired |= retired
+            self._trades = trades + self._trades  # in order, ahead of newer ones
             await asyncio.sleep(self.RETRY_S)
             self._wake.set()

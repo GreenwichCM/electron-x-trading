@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 
 from trading_core import environment_from
+from trading_core.hours import parse_holidays
 from trading_db import DbSettings
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -30,6 +32,7 @@ class Settings:
     rules_refresh_s: float = 10.0  # how often the users and trading rules are reloaded
     environment: str = "development"  # TRADING_ENV: development, beta or production
     order_entry: bool = True  # ORDER_ENTRY=N: record-only, orders are entered on the ElectronX screen
+    exchange_holidays: frozenset[date] = frozenset()  # EXCHANGE_HOLIDAYS: days ElectronX is closed
 
     def __post_init__(self) -> None:
         if self.dev_login and self.host not in LOOPBACK:
@@ -49,6 +52,7 @@ class Settings:
 
         try:
             environment = environment_from(env)
+            holidays = parse_holidays(env.get("EXCHANGE_HOLIDAYS", ""))
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
         return cls(
@@ -64,4 +68,5 @@ class Settings:
             rules_refresh_s=float(get("RULES_REFRESH_S", str(cls.rules_refresh_s))),
             environment=environment,
             order_entry=get("ORDER_ENTRY", "Y").upper() in ("Y", "YES", "1", "TRUE"),
+            exchange_holidays=holidays,
         )

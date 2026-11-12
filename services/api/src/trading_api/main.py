@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import signal
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from trading_core import (
     decode_blocks,
 )
 from trading_core.environment import check_redis_async
+from trading_core.hours import HOLIDAYS, ExchangeHours
 from trading_db import DbError, WrongEnvironment, connect, follow_rules
 
 from .auth import DEV_USERS, Authenticator, DevAuthenticator, User, users_from_rules
@@ -68,6 +70,9 @@ class BlockRequest(BaseModel):
 
 
 DC_POSITIONS_KEY = "dc:positions"
+TRADES_STREAM = "md:trades"  # marketdata: every trade on the exchange
+TRADES_SCANNED = 5000  # recent trades searched for one contract's
+STREAM_ID = re.compile(r"^\d+-\d+$")
 RISK_SNAPSHOT_KEY = "risk:snapshot"
 
 
@@ -89,6 +94,8 @@ def create_app(
         raise ConfigError("no login configured: set API_DEV_LOGIN=Y for development")
     oe = orderentry or OrderEntryClient(settings.oe_url, settings.oe_token)
     record_only = not settings.order_entry  # no orderentry: every order is from the ElectronX screen
+    # ElectronX's published calendar, and any days added in EXCHANGE_HOLIDAYS
+    hours = ExchangeHours(holidays=HOLIDAYS | dict.fromkeys(settings.exchange_holidays, "exchange holiday"))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -219,6 +226,42 @@ def create_app(
     async def md_summary(user: Annotated[User, Depends(require("md.view"))]) -> dict[str, Any]:
         """Which contracts have a bid and an offer right now (for "only with prices" on the price screen)."""
         return {"two_sided": sorted(app.state.hub.two_sided)}
+
+    @app.get("/api/market-hours")
+    async def market_hours(user: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
+        """Whether ElectronX is open now and when that changes (trading_core.hours)."""
+        now = datetime.now(UTC)
+        return {
+            **hours.status(now).to_dict(),
+            "schedule": hours.describe(),
+            "upcoming": hours.upcoming(now),
+        }
+
+    @app.get("/api/trades")
+    async def trades(
+        user: Annotated[User, Depends(require("md.view"))], symbol: str = "", after: str = "", limit: int = 100
+    ) -> dict[str, Any]:
+        """Time & sales: the latest trades on the exchange, newest first, from marketdata's md:trades stream.
+
+        `after`: only trades after this stream id (the `last_id` of the previous answer), so a browser asks
+        every second for what is new. `symbol`: one contract's trades, from the last TRADES_SCANNED.
+        """
+        if after and not STREAM_ID.match(after):
+            raise HTTPException(status_code=400, detail="after must be a stream id such as 1731400000000-0")
+        limit = max(1, min(limit, 500))
+        found = await app.state.redis.xrevrange(
+            TRADES_STREAM, "+", f"({after}" if after else "-", count=TRADES_SCANNED if symbol else limit
+        )
+        out = []
+        for entry_id, fields in found:
+            trade = json.loads(fields.get(b"data") or fields.get("data") or "{}")
+            if symbol and trade.get("symbol") != symbol:
+                continue
+            out.append({"id": entry_id.decode() if isinstance(entry_id, bytes) else entry_id, **trade})
+            if len(out) >= limit:
+                break
+        newest = found[0][0] if found else after
+        return {"trades": out, "last_id": newest.decode() if isinstance(newest, bytes) else newest}
 
     @app.get("/api/md/{symbol}")
     async def latest_book(symbol: str, user: Annotated[User, Depends(require("md.view"))]) -> dict[str, Any]:

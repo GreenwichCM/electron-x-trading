@@ -95,8 +95,10 @@ export function hasEnded(i: Instrument | undefined, now: number): boolean {
 }
 
 /** What the row shows: OPEN, CLOSED (for now), HALTED, SUSPENDED, PENDING, EXPIRED, SETTLED, ENDED
- *  (past its last trade time), or NO DATA (no live book yet). */
-export function rowState(i: Instrument | undefined, book: Book | undefined, now: number): string {
+ *  (past its last trade time), or NO DATA (no live book yet). The exchange's own state comes first, except
+ *  OPEN: an empty book carries no state, and an OPEN from before the close can outlast it, so OPEN or no
+ *  state shows OPEN while ElectronX is open by its trading hours and CLOSED while it is shut (`exchangeOpen`). */
+export function rowState(i: Instrument | undefined, book: Book | undefined, now: number, exchangeOpen = true): string {
   if (book?.settlement?.final) return "SETTLED";
   const state = book?.state || i?.state || "";
   if (ENDED_STATES.has(state)) return state;
@@ -104,7 +106,7 @@ export function rowState(i: Instrument | undefined, book: Book | undefined, now:
   if (ends !== null && ends <= now) return "ENDED";
   if (state && state !== "OPEN") return state;
   if (!book || book.stale) return "NO DATA";
-  return "OPEN";
+  return exchangeOpen ? "OPEN" : "CLOSED";
 }
 
 export const spread = (b: Book | undefined) => (b?.bid != null && b?.ask != null ? b.ask - b.bid : null);
@@ -166,7 +168,12 @@ export type StatusCount = { market: string; open: number; closed: number; halted
 
 /** Per market, how many of its contracts still trading are open, closed (for now), halted or not reported
  *  yet: so a closed market reads as closed, not as broken. */
-export function marketStatus(contracts: Contract[], instruments: Map<string, Instrument>, now: number): StatusCount[] {
+export function marketStatus(
+  contracts: Contract[],
+  instruments: Map<string, Instrument>,
+  now: number,
+  exchangeOpen = true,
+): StatusCount[] {
   const out = new Map<string, StatusCount>();
   for (const c of contracts) {
     const i = instruments.get(c.symbol);
@@ -176,6 +183,7 @@ export function marketStatus(contracts: Contract[], instruments: Map<string, Ins
     if (state === "OPEN") row.open += 1;
     else if (state === "CLOSED") row.closed += 1;
     else if (state) row.halted += 1; // HALTED, SUSPENDED, PENDING
+    else if (!exchangeOpen) row.closed += 1; // no word from the exchange, and it is shut
     else row.unknown += 1;
     out.set(c.market, row);
   }

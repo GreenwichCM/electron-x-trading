@@ -1,6 +1,7 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useContext, useEffect, useState } from "react";
 import { api } from "./auth";
 import { closesIn, type Instrument, rowState, tradingEnds } from "./board";
+import { ExchangeOpen } from "./MarketHours";
 import type { Book } from "./useMarketData";
 import type { Order } from "./useOrders";
 
@@ -68,7 +69,8 @@ export default function OrderTicket({
   const inst = instruments.get(symbol);
   const lot = inst?.lot_size ?? 1;
   const tick = inst?.tick_size ?? 0.25;
-  const state = rowState(inst, books[symbol], Date.now());
+  const exchangeOpen = useContext(ExchangeOpen);
+  const state = rowState(inst, books[symbol], Date.now(), exchangeOpen);
   const ends = tradingEnds(inst);
   const found = symbol ? problems(Number(qty), price === "" ? NaN : Number(price), inst, state) : [];
   const options = symbols.includes(symbol) || !symbol ? symbols : [symbol, ...symbols];

@@ -56,3 +56,18 @@ def test_updates_wait_while_redis_is_down():
         await task
 
     run(scenario())
+
+
+def test_every_trade_goes_to_the_trades_stream_in_order():
+    async def scenario():
+        r = FakeAsyncRedis(server=FakeServer())
+        pub = RedisPublisher(r)
+        task = asyncio.create_task(pub.run())
+        pub.trade({"symbol": "X", "price": 1.0})
+        pub.trade({"symbol": "X", "price": 2.0})  # never conflated
+        await pub.close()
+        await task
+        entries = await r.xrange("md:trades")
+        assert [json.loads(fields[b"data"])["price"] for _, fields in entries] == [1.0, 2.0]
+
+    run(scenario())

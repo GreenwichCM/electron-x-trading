@@ -1,4 +1,6 @@
+import { useContext } from "react";
 import { type Instrument, rowState, spread } from "./board";
+import { ExchangeOpen } from "./MarketHours";
 import { StateBadge } from "./PriceBoard";
 import type { Book } from "./useMarketData";
 
@@ -17,6 +19,7 @@ export default function DepthLadder({
   inst: Instrument | undefined;
   onPick: (side: "BUY" | "SELL", price: number) => void;
 }) {
+  const exchangeOpen = useContext(ExchangeOpen);
   if (!symbol) {
     return (
       <section className="ladder">
@@ -31,10 +34,11 @@ export default function DepthLadder({
   const biggest = Math.max(1, ...bids.map(([, q]) => q), ...asks.map(([, q]) => q));
   const bar = (qty: number) => `${Math.round((100 * qty) / biggest)}%`;
   const trade = book?.last_trade;
+  const state = rowState(inst, book, Date.now(), exchangeOpen);
   return (
     <section className="ladder">
       <h2>
-        Order book <StateBadge state={rowState(inst, book, Date.now())} />
+        Order book <StateBadge state={state} />
       </h2>
       <div className="ladder-symbol">{symbol}</div>
       <table>

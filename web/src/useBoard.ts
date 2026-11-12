@@ -62,7 +62,7 @@ function useTick(everyMs: number): number {
 /** Every listed contract, the filters and the contracts they select (at most MAX_ROWS), how they are shown,
  *  and the named views a user has saved. All of it is remembered per user in this browser. `mine` is the set
  *  of contracts with a position or a working order. */
-export function useBoard(userId: string, mine: Set<string>) {
+export function useBoard(userId: string, mine: Set<string>, exchangeOpen = true) {
   // Asked often, but cheap: while the list is unchanged the api answers "304 Not Modified" with no body.
   const instruments = usePolling<Instrument[]>("/api/instruments", 10000);
   const summary = usePolling<{ two_sided: string[] }>("/api/md/summary", 5000);
@@ -151,9 +151,9 @@ export function useBoard(userId: string, mine: Set<string>) {
       strip,
       stripNeeds,
       watched: strip ? [...strip.cells.values()] : stored.view === "strip" ? [] : rows.map((c) => c.symbol),
-      statuses: marketStatus(market ? inMarket : live, byId, now),
+      statuses: marketStatus(market ? inMarket : live, byId, now, exchangeOpen),
     };
-  }, [instruments, summary, stored.filters, stored.view, mine, now]);
+  }, [instruments, summary, stored.filters, stored.view, mine, now, exchangeOpen]);
 
   return {
     ...computed,

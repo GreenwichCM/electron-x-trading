@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from trading_fix import FixSession, SeqStore, SessionConfig
 from trading_marketdata import MarketDataApp, MemoryPublisher
-from trading_sim import BID, BUY, OFFER, SimGateway, SimInstrument, SimMarketData
+from trading_sim import BID, BUY, OFFER, SELL, SimGateway, SimInstrument, SimMarketData
 
 SENDER = "TEST-MD01"
 INSTRUMENTS = [
@@ -102,6 +102,16 @@ def test_trades_are_reported():
             h.md.flush()
             await wait_for(lambda: (h.pub.books[SYMBOLS[0]]["last_trade"] or {}).get("price") == price)
             assert h.pub.books[SYMBOLS[0]]["last_trade"]["aggressor"] == "BUY"
+            # and on the time & sales, once, at the exchange's time
+            await wait_for(lambda: len(h.pub.trades) == 1)
+            tape = h.pub.trades[0]
+            assert (tape["symbol"], tape["price"], tape["qty"], tape["aggressor"]) == (SYMBOLS[0], price, 1.0, "BUY")
+            assert tape["trade_id"] == h.pub.books[SYMBOLS[0]]["last_trade"]["trade_id"] != ""
+            assert tape["time"].endswith("+00:00")
+            h.md.trade(SYMBOLS[0], SELL, 1)
+            h.md.flush()
+            await wait_for(lambda: len(h.pub.trades) == 2)
+            assert h.pub.trades[1]["aggressor"] == "SELL"
 
     run(scenario())
 
@@ -270,3 +280,27 @@ def test_interest_is_read_in_one_call_and_entries_of_stopped_apis_are_ignored():
         assert seen[0] == ({"A", "B"}, {"C"})
 
     run(scenario())
+
+
+def test_a_trade_sent_twice_is_on_the_time_and_sales_once():
+    from trading_fix import FixMessage
+    from trading_marketdata import OrderBook
+
+    pub = MemoryPublisher()
+    app = MarketDataApp(pub, [SYMBOLS[0]])
+    app.books[SYMBOLS[0]] = OrderBook(SYMBOLS[0])
+    app.books[SYMBOLS[0]].stale = False
+    trade = [(279, "0"), (269, "2"), (55, SYMBOLS[0]), (270, "41.25"), (271, "3"), (1003, "T1"), (2446, "2")]
+    trade += [(272, "20261112"), (273, "15:04:05.123456789")]
+    for _ in range(2):
+        app._on_incremental(FixMessage([(35, "X"), (268, "1"), *trade]))
+    assert pub.trades == [
+        {
+            "symbol": SYMBOLS[0],
+            "price": 41.25,
+            "qty": 3.0,
+            "aggressor": "SELL",
+            "trade_id": "T1",
+            "time": "2026-11-12T15:04:05.123+00:00",
+        }
+    ]

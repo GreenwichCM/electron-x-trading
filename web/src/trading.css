@@ -501,3 +501,87 @@ fieldset.choices legend {
   color: var(--muted);
   font-size: 13px;
 }
+
+/* ---- market hours (header) ---- */
+.market-hours {
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: help;
+}
+.market-hours.open {
+  color: var(--bid);
+}
+.market-hours.closed {
+  color: var(--muted);
+}
+
+/* ---- time & sales ---- */
+.tape h2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tape-modes {
+  display: inline-flex;
+  gap: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.tape-modes button {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tape-modes button.active {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.tape-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.tape table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.tape th {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+}
+.tape th,
+.tape td {
+  padding: 2px 4px;
+}
+.tape td.contract {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+.tape tr.buy td.num {
+  color: var(--bid);
+}
+.tape tr.sell td.num {
+  color: var(--ask);
+}
+.tape td.empty {
+  color: var(--muted);
+  padding: 8px 4px;
+}
+.tape-symbol {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}

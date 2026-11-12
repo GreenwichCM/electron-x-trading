@@ -6,11 +6,13 @@ import EnvironmentBadge from "./EnvironmentBadge";
 import { type Environment, useEnvironment } from "./environment";
 import KillSwitch from "./KillSwitch";
 import Login from "./Login";
+import MarketHours, { ExchangeOpen, useMarketHours } from "./MarketHours";
 import OrderTicket, { type TicketPreset } from "./OrderTicket";
 import Positions from "./Positions";
 import PriceBoard, { type Working } from "./PriceBoard";
 import Risk from "./Risk";
 import Rules from "./Rules";
+import TimeAndSales from "./TimeAndSales";
 import UnknownUsers from "./UnknownUsers";
 import { useBoard } from "./useBoard";
 import { useMarketData } from "./useMarketData";
@@ -62,7 +64,12 @@ function Workspace({
     [positions, working],
   );
 
-  const board = useBoard(user.id, mine);
+  // ElectronX's hours decide what a contract with no state from the exchange shows (an empty book carries
+  // none): CLOSED while the exchange is shut. The simulator trades at any time.
+  const hours = useMarketHours();
+  const simulator = env?.name === "development";
+  const exchangeOpen = simulator || (hours?.open ?? true);
+  const board = useBoard(user.id, mine, exchangeOpen);
   const [selected, setSelected] = useState("");
   const watched = useMemo(
     () => (selected && !board.watched.includes(selected) ? [...board.watched, selected] : board.watched),
@@ -79,10 +86,12 @@ function Workspace({
   const orderEntry = env?.order_entry ?? false;
 
   return (
+    <ExchangeOpen.Provider value={exchangeOpen}>
     <main>
       <header>
         <h1>ElectronX trading</h1>
         <EnvironmentBadge env={env} />
+        <MarketHours hours={hours} simulator={simulator} />
         <span className={`status ${status}`}>{status}</span>
         <div className="spacer" />
         <div className="user">
@@ -129,6 +138,7 @@ function Workspace({
             inst={board.instruments.get(selected)}
             onPick={(side, price) => pick(selected, side, price)}
           />
+          <TimeAndSales selected={selected} />
         </div>
       </div>
       {user.permissions.includes("risk.view.all") && <UnknownUsers />}
@@ -147,6 +157,7 @@ function Workspace({
         </div>
       </section>
     </main>
+    </ExchangeOpen.Provider>
   );
 }
 

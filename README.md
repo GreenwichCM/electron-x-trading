@@ -70,6 +70,17 @@ The price screen shows at most 200 contracts, and the browser gets live prices o
   click on a price does the same. The ticket checks the contract's tick size, lot size, price limits and
   state before sending.
 * Filters, columns, layout and sort are remembered per user in their browser, and can be saved as named views.
+* Time & sales, under the order book: every trade on the exchange as it happens, newest first, with its price,
+  size and who took (green: the buyer took the offer; red: the seller hit the bid), for all contracts or the
+  selected one. marketdata keeps the last 100,000 trades in the Redis stream `md:trades`, at the exchange's
+  time. It only sees trades in contracts it is subscribed to: those on a screen or held first, then the rest
+  (`MD_BACKGROUND`).
+* The header says whether ElectronX is open and when that changes: Monday to Friday, 7:00am to 8:00pm CT
+  (https://www.electronx.com/products), closed on exchange holidays and closing at 1:00pm CT on early-close
+  days. The holidays are not in the FIX feed: ElectronX's calendar for 2025 to 2027 (Exchange Holidays on
+  https://www.electronx.com/regulatory) is in `trading_core/hours.py`; when it publishes later years, add
+  them there, or meanwhile as dates in `EXCHANGE_HOLIDAYS` in `services/api/.env`. Hovering shows the time
+  in your own time zone and the next holidays and early closes. The simulator trades at any time.
 
 Marketdata subscribes at the exchange in order of interest, as trading platforms do: first the contracts
 on someone's screen (the api tells it through Redis, `md:wanted:*`), then those the account holds, then
@@ -128,8 +139,8 @@ Redis database and SQL database, `trading_uat`, so nothing mixes with the simula
 `uat.env` with the exchange's address, passwords and certificates. All of these and the certificates are
 git-ignored: never commit them. Stop the development stack first; both use the api and web ports.
 
-1. Certificates: put the three files ElectronX sent in `certs/` (`ca.crt`, `client.crt`, `client.key`),
-   then `chmod 600 certs/client.key`.
+1. Certificates: put the three beta files ElectronX sent in `certs/beta/` (`ca.crt`, `client.crt`,
+   `client.key`), then `chmod 600 certs/beta/client.key`.
 2. Settings: copy `services/uat.env.example` to `services/uat.env`, and in `services/marketdata`,
    `services/orderentry` and `services/dropcopy` copy `uat.env.example` to `uat.env`. Fill in the three
    passwords from the ElectronX FIX connectivity sheet. `services/uat.env` says `TRADING_ENV=beta`.
@@ -167,7 +178,8 @@ minimum message counts (logons, heartbeats, resend requests, rejects, orders, ca
 Traders enter their orders on the ElectronX screen. The drop copy reports every order and fill of the
 account, and the recorder keeps them in the production database, POWER (`services/db.power.env`), with
 `source = 'electronx'` and the trader's ElectronX login, as in "Orders from the ElectronX screen" above.
-Market data, positions, P&L and the risk pages work as in beta.
+Market data, positions, P&L and the risk pages work as in beta. ElectronX is open Monday to Friday, 7:00am to
+8:00pm CT; outside those hours the books are empty and nothing trades, which the header shows.
 
 There is no order entry session. orderentry refuses to run with `TRADING_ENV=production`, the api runs
 with `ORDER_ENTRY=N` (`services/prod.env`), and the app shows no order ticket, kill switch or trader
@@ -186,7 +198,10 @@ Snapshot API; beta refuses the production Snapshot API.
 2. Settings: copy `services/prod.env.example` to `services/prod.env`, `services/db.power.env.example` to
    `services/db.power.env` (the production database login), and in `services/marketdata` and
    `services/dropcopy` copy `prod.env.example` to `prod.env`. Fill in the host, port, SenderCompID and
-   password of each session from the production FIX connectivity sheet. All are git-ignored.
+   password of each session from the production FIX connectivity sheet. All are git-ignored. The production
+   Snapshot API is off until you put its URL (https://trade.electronx.com) and a key made on
+   trade.electronx.com in `services/marketdata/prod.env`; left blank, it also keeps a beta one in
+   `services/marketdata/.env` from being used.
 3. Check the way to the exchange without logging on:
 
        uv run --env-file services/marketdata/.env --env-file services/prod.env --env-file services/marketdata/prod.env python -m trading_fix.check MD

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import {
   closesIn,
   type Column,
@@ -13,6 +13,7 @@ import {
   spread,
   tradingEnds,
 } from "./board";
+import { ExchangeOpen } from "./MarketHours";
 import type { Contract } from "./symbols";
 import type { Board } from "./useBoard";
 import type { Book } from "./useMarketData";
@@ -84,7 +85,7 @@ type RowProps = {
 
 function Row({ contract, book, inst, columns, now, position, working, selected, onPick, onSelect }: RowProps) {
   const trade = book?.last_trade;
-  const state = rowState(inst, book, now);
+  const state = rowState(inst, book, now, useContext(ExchangeOpen));
   const ends = tradingEnds(inst);
   const dam = book?.marks?.dam?.price;
   const settle = book?.settlement;
@@ -434,6 +435,7 @@ function ListView({ board, books, positions, working, selected, onPick, onSelect
 
 function StripView({ board, books, positions, selected, onPick, onSelect }: BoardProps) {
   const now = useNow(5000);
+  const exchangeOpen = useContext(ExchangeOpen);
   if (!board.strip) return <p className="empty">{board.stripNeeds || "Waiting for the instrument list…"}</p>;
   const { hubs, hours, cells } = board.strip;
   return (
@@ -457,7 +459,7 @@ function StripView({ board, books, positions, selected, onPick, onSelect }: Boar
                 const symbol = cells.get(`${hub}|${hourRow.hour}`);
                 if (!symbol) return <td key={hub} />;
                 const book = books[symbol];
-                const state = rowState(board.instruments.get(symbol), book, now);
+                const state = rowState(board.instruments.get(symbol), book, now, exchangeOpen);
                 const position = positions[symbol] ?? 0;
                 return (
                   <td

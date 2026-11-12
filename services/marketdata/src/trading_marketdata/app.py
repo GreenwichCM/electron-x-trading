@@ -47,6 +47,7 @@ DEPTH_LEVELS = 10
 KEEP_UNSETTLED_S = 3 * 24 * 3600
 SUBSCRIBE_PER_S = 50
 ENDED_STATES = {"EXPIRED", "TERMINATED"}  # TradingSessionID(336)
+TAPE_IDS_KEPT = 20_000  # trade ids remembered, so a trade sent twice is on the time & sales once
 
 
 def _end_of_trading(symbol: str, inst: Instrument) -> float:
@@ -121,6 +122,7 @@ class MarketDataApp:
         self._still_trading: list[str] = []  # soonest end of trading first
         self._next_batch: asyncio.TimerHandle | None = None
         self._session: FixSession | None = None
+        self._taped: dict[str, None] = {}  # TradeIDs already on the time & sales, oldest first
 
     # ---- SessionApp ------------------------------------------------------------------------
 
@@ -355,6 +357,8 @@ class MarketDataApp:
                     "trade_id": entry.get(1003, ""),
                     "time": _now(),
                 }
+                if entry.get(279) != "2":  # not a delete
+                    self._tape(book.symbol, entry)
             elif entry.get(269) == SETTLEMENT:
                 if entry.get(279) != "2":  # not a delete
                     self._settlement(book.symbol, entry)
@@ -364,6 +368,27 @@ class MarketDataApp:
             touched[book.symbol] = book
         for book in touched.values():
             self._publish(book)
+
+    def _tape(self, symbol: str, entry: dict[int, str]) -> None:
+        """A trade for the time & sales, at the exchange's time. Only incremental updates bring trades here:
+        a snapshot repeats the latest one, which is not a new trade."""
+        trade_id = entry.get(1003, "")
+        if trade_id:
+            if trade_id in self._taped:
+                return
+            self._taped[trade_id] = None
+            if len(self._taped) > TAPE_IDS_KEPT:
+                del self._taped[next(iter(self._taped))]
+        self.publisher.trade(
+            {
+                "symbol": symbol,
+                "price": _px(entry),
+                "qty": float(entry.get(271) or 0),
+                "aggressor": AGGRESSOR.get(entry.get(2446, ""), ""),
+                "trade_id": trade_id,
+                "time": _entry_time(entry),
+            }
+        )
 
     def _settlement(self, symbol: str, entry: dict[int, str]) -> None:
         price = _px(entry)
