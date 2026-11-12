@@ -39,18 +39,14 @@ class OrderEntryApp:
     def __init__(
         self,
         sink: OrderSink,
-        account: str,
-        default_trader: str,
         rules: TradingRules | None = None,
         throttle: Throttle | None = None,
-        capacity: str = "2",
         instruments: Mapping[str, Instrument] | None = None,
     ):
         self.sink = sink
-        self.account = account
-        self.default_trader = default_trader  # ElectronX trader id for anyone without their own
-        self.capacity = capacity
-        self.rules = rules  # from SQL Server (set_rules); until then every new order is rejected
+        # From SQL Server (set_rules); until then every new order is rejected. Each trader's id is their
+        # ElectronX login, sent as SenderSubID(50); each order goes on an account they may trade on.
+        self.rules = rules
         self.throttle = throttle or Throttle(90)
         self.instruments: dict[str, Instrument] = dict(instruments or {})
         self.session: FixSession | None = None
@@ -113,10 +109,14 @@ class OrderEntryApp:
 
     # ---- requests from the api -------------------------------------------------------------
 
-    def submit(self, trader: str, symbol: str, side: str, qty: int, price: float, tif: str = "DAY") -> Order:
+    def submit(
+        self, trader: str, symbol: str, side: str, qty: int, price: float, tif: str = "DAY", account: str = ""
+    ) -> Order:
+        """A new order for `trader` (their user id, which is their ElectronX login), on `account` or else
+        their only one."""
         order = Order(self._new_id(), trader, symbol, side, qty, price, tif)
-        order.account, order.capacity = self.account, self.capacity
-        order.exchange_user = self._exchange_trader(trader)
+        order.account = account
+        order.exchange_user = trader  # the exchange knows them by the same login
         self.orders[order.cl_ord_id] = order
         reason = self._precheck(order)
         if reason is None:
@@ -196,15 +196,19 @@ class OrderEntryApp:
 
     def set_screen_positions(self, by_user: Mapping[str, Mapping[str, int]]) -> None:
         """What each ElectronX user holds from orders entered on the ElectronX screen (from dropcopy)."""
-        self.screen_by_user = {user: dict(held) for user, held in by_user.items()}
+        merged: dict[str, dict[str, int]] = {}
+        for user, held in by_user.items():  # ElectronX logins as sent; ids here are in lower case
+            mine = merged.setdefault(user.lower(), {})
+            for symbol, qty in held.items():
+                mine[symbol] = mine.get(symbol, 0) + qty
+        self.screen_by_user = merged
 
     def screen_position(self, trader: str, symbol: str) -> int:
         """The trader's position in `symbol` from the ElectronX screen. It counts against the same
         position limit as orders sent from here."""
-        user = self._exchange_trader(trader)
-        if self.rules is None or self.rules.trader_for(user) != trader:
-            return 0  # this trader's ElectronX id is shared or unknown: it cannot say whose it is
-        return self.screen_by_user.get(user, {}).get(symbol, 0)
+        if self.rules is None or self.rules.trader_for(trader) != trader:
+            return 0  # not a user here
+        return self.screen_by_user.get(trader, {}).get(symbol, 0)
 
     def positions_by_trader(self) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {}
@@ -223,13 +227,13 @@ class OrderEntryApp:
             [
                 (11, cancel_id),
                 (41, order.cl_ord_id),
-                (1, self.account),
+                (1, order.account),
                 (55, order.symbol),
                 (54, SIDE_TO_FIX[order.side]),
                 (38, str(order.qty)),
                 (60, utc_timestamp()),
             ],
-            header=[(50, order.exchange_user or self._exchange_trader(order.trader))],
+            header=[(50, order.exchange_user or order.trader)],
         )
         self._remember(seq, order.cl_ord_id, cancel_id)
         event = {"event": "cancel_request", "by": by, "reason": reason, "request_id": cancel_id}
@@ -407,6 +411,11 @@ class OrderEntryApp:
         limits, reason = self._limits_for(order)
         if limits is None:
             return reason
+        assert self.rules is not None  # _limits_for found limits
+        account, reason = self.rules.account_for(order.trader, order.account)
+        if account is None:
+            return reason
+        order.account, order.capacity = account.account_id, account.capacity
         open_orders = [o for o in self.orders.values() if o.trader == order.trader and o.live and o is not order]
         key = (order.trader, order.symbol)
         position = self.positions.get(key, 0) + self.screen_position(*key)  # the screen's counts too
@@ -426,7 +435,7 @@ class OrderEntryApp:
             "D",
             [
                 (11, order.cl_ord_id),
-                (1, self.account),
+                (1, order.account),
                 (55, order.symbol),
                 (54, SIDE_TO_FIX[order.side]),
                 (38, str(order.qty)),
@@ -434,7 +443,7 @@ class OrderEntryApp:
                 (44, _price_text(order.price, inst.tick_size)),
                 (59, TIF_TO_FIX[order.tif]),
                 (60, utc_timestamp()),
-                (582, self.capacity),
+                (582, order.capacity),
                 (1028, "Y"),  # ManualOrderIndicator: entered by a person
             ],
             header=[(50, order.exchange_user)],
@@ -453,9 +462,6 @@ class OrderEntryApp:
         if missing:
             return None, f"no {', '.join(missing)} limit is set for {order.trader} on {order.symbol}"
         return RiskLimits(lim.max_order_qty, lim.max_order_notional, lim.max_open_orders, lim.max_position), ""
-
-    def _exchange_trader(self, trader: str) -> str:
-        return (self.rules.exchange_trader(trader) if self.rules else None) or self.default_trader
 
     def _remember(self, seq: int, cl_ord_id: str, request_id: str = "") -> None:
         """Which order a message was about, by its sequence number, in case the session rejects it."""

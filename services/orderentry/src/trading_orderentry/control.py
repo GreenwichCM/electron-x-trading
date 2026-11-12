@@ -23,6 +23,7 @@ class NewOrder(BaseModel):
     qty: int = Field(gt=0)
     price: float
     tif: Literal["DAY", "GTC", "IOC", "FOK"] = "DAY"
+    account: str = ""  # empty: the trader's only account
 
 
 class CancelRequest(BaseModel):
@@ -49,7 +50,7 @@ def create_control_app(
     async def new_order(body: NewOrder) -> dict[str, Any]:
         if load_instrument is not None:
             await load_instrument(body.symbol)
-        return oe.submit(body.trader, body.symbol, body.side, body.qty, body.price, body.tif).to_dict()
+        return oe.submit(body.trader, body.symbol, body.side, body.qty, body.price, body.tif, body.account).to_dict()
 
     @app.post("/orders/{cl_ord_id}/cancel")
     def cancel(cl_ord_id: str, body: CancelRequest) -> dict[str, Any]:

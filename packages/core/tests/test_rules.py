@@ -1,4 +1,4 @@
-from trading_core.rules import ANY, Limits, Trader, TradingRules, market_and_product
+from trading_core.rules import ANY, Account, Limits, Trader, TradingRules, market_and_product
 
 ERCOT = "BFUT500-ERCOT-HB_NORTH-261231-15"
 ERCOT_100 = "BFUT100-ERCOT-HB_WEST-261231-15"
@@ -43,28 +43,31 @@ def test_a_limit_nobody_set_is_missing():
     assert rules.limits_for("alice", ERCOT).missing("max_order_qty", "max_position") == ["max_position"]
 
 
-def test_everyone_and_exchange_trader_ids():
+def test_everyone_may_trade_on_one_account():
     rules = TradingRules.everyone(["alice"], max_order_qty=10)
     assert rules.check_trader("alice", PJM) is None and rules.limits_for("alice", PJM).max_order_qty == 10
-    assert RULES.exchange_trader("dave") == "dave@example.com" and RULES.exchange_trader("alice") is None
+    assert rules.account_for("alice") == (Account("TA-TEST"), "")
 
 
-def test_trader_for_an_electronx_id():
+def test_a_user_is_their_electronx_login_in_any_case():
+    rules = TradingRules(traders={"jane@x.com": Trader("jane@x.com")}, entitlements=frozenset(), limits={})
+    assert rules.trader_for("jane@x.com") == "jane@x.com" and rules.trader_for("Jane@X.com") == "jane@x.com"
+    assert rules.trader_for("nobody@x.com") is None and rules.trader_for("") is None and rules.trader_for(None) is None
+
+
+def test_only_traders_trade_and_only_on_their_accounts():
     rules = TradingRules(
         traders={
-            "alice": Trader("alice", "firms/h/users/alice"),
-            "dave": Trader("dave", "shared"),
-            "erin": Trader("erin", "shared"),
-            "bob": Trader("bob"),
+            "jane@x.com": Trader("jane@x.com", accounts=("A1", "A2")),
+            "rick@x.com": Trader("rick@x.com", roles=frozenset({"risk"})),
+            "tom@x.com": Trader("tom@x.com"),
         },
-        entitlements=frozenset(),
+        entitlements=frozenset({(ANY, ANY, ANY)}),
         limits={},
+        accounts={"A1": Account("A1", capacity="1"), "A2": Account("A2"), "A3": Account("A3")},
     )
-    assert rules.trader_for("firms/h/users/alice") == "alice"
-    assert rules.trader_for("shared") is None  # two traders have it: it cannot say who traded
-    assert rules.trader_for("nobody") is None and rules.trader_for("") is None and rules.trader_for(None) is None
-
-
-def test_an_electronx_id_matches_whatever_its_case():
-    rules = TradingRules(traders={"jane": Trader("jane", "Jane@x.com")}, entitlements=frozenset(), limits={})
-    assert rules.trader_for("jane@X.COM") == "jane" and rules.trader_for("Jane@x.com") == "jane"
+    assert rules.check_trader("rick@x.com", PJM) == "rick@x.com is not a trader (roles: risk)"
+    assert rules.account_for("jane@x.com", "A1") == (Account("A1", capacity="1"), "")
+    assert rules.account_for("jane@x.com", "A3")[1] == "jane@x.com may not trade on account A3"
+    assert "say which account" in rules.account_for("jane@x.com")[1]
+    assert "no ElectronX account" in rules.account_for("tom@x.com")[1]

@@ -86,15 +86,12 @@ the trader's ElectronX id (TargetSubID 57), so they are not lost:
 * dropcopy counts an order as ours if orderentry sent it, and otherwise, after 2 seconds, as from the
   ElectronX screen. Only our orders are compared with orderentry, so screen trading never trips the kill
   switch. The Positions panel shows it in its own column; a fill not placed yet shows as "checking".
-* riskmonitor gives screen fills to the trader whose `exchange_trader_id` in `electronx.traders` is that
-  ElectronX id: they count in that trader's P&L and daily loss limit. orderentry counts them against the
-  trader's position limit too. Give each trader who uses the screen their own `exchange_trader_id`; fills
-  whose id no trader has stay unattributed.
-* Each ElectronX id belongs to one trader at most: the Trading rules page refuses to give it to a second
-  one, and so does the database. Ids match whatever their case (`Jane@x.com` is `jane@x.com`).
-* The dashboard warns risk about anyone trading on the screen whose ElectronX id no trader has. Their
-  orders are still recorded, with `trader` blank. Approving the id for a trader on the Trading rules
-  page then fills in that trader on those orders as well. After a change made directly in SQL:
+* A user's id is their ElectronX login (see Users and accounts below), so a screen order belongs to the
+  user whose id is its TargetSubID, whatever its case (`Jane@x.com` is `jane@x.com`). riskmonitor counts
+  their screen fills in their P&L and daily loss limit, and orderentry against their position limit.
+* The dashboard warns risk about anyone trading on the screen whose ElectronX login is not a user here.
+  Their orders are still recorded, with `trader` blank. Adding them as a user on the Trading rules page
+  then fills them in on those orders as well. After users are added directly in SQL:
 
       uv run --env-file services/db.env python -m trading_db check-traders --fill-in
 
@@ -109,11 +106,9 @@ the trader's ElectronX id (TargetSubID 57), so they are not lost:
   nothing from us: orders sent from here are on the same trading account, so the ElectronX screen
   shows them.
 
-To try it, give dave an ElectronX id, then have the simulator place screen orders for it:
+To try it, have the simulator place screen orders as dave, and as someone who is not a user here:
 
-    UPDATE electronx.traders SET exchange_trader_id = 'firms/huron/users/dave' WHERE trader_id = N'dave';
-
-    SIM_SCREEN_USERS=firms/huron/users/dave uv run honcho start
+    SIM_SCREEN_USERS=dave@example.test,stranger@example.test uv run honcho start
 
 `SIM_SCREEN_EVERY_S` (60) sets how often.
 
@@ -129,7 +124,7 @@ git-ignored: never commit them. Stop the development stack first; both use the a
    then `chmod 600 certs/client.key`.
 2. Settings: copy `services/uat.env.example` to `services/uat.env`, and in `services/marketdata`,
    `services/orderentry` and `services/dropcopy` copy `uat.env.example` to `uat.env`. Fill in the three
-   passwords and `OE_DEFAULT_TRADER` from the ElectronX FIX connectivity sheet.
+   passwords from the ElectronX FIX connectivity sheet.
 3. Check the way to the exchange without logging on (no FIX password is used):
 
        uv run --env-file services/marketdata/.env --env-file services/marketdata/uat.env python -m trading_fix.check MD
@@ -138,8 +133,10 @@ git-ignored: never commit them. Stop the development stack first; both use the a
 
    A TCP failure means ElectronX has not allowed this machine's public IP address yet, or a firewall
    blocks the port. A TLS failure means the certificate files are not the right ones.
-4. Database: `migrate` and `seed-dev` with `--env-file services/db.env --env-file services/uat.env`, then
-   give each test user an Authorized Trading User's email from the sheet as `exchange_trader_id`.
+4. Database: `migrate` with `--env-file services/db.env --env-file services/uat.env`. Then add the
+   sheet's Authorized Trading Users as users (their email is their id, role trader) and its account to
+   `electronx.accounts`, and let them trade on it (see Users and accounts). `seed-dev` adds the test
+   users too, if you want to sign in as a risk user to approve changes.
 5. Read only first: `uv run honcho -f Procfile.uat start marketdata dropcopy riskmonitor recorder api web`.
    Prices fill the price screen; demo books are sometimes CLOSED, so use "Trading now".
 6. Then everything: `uv run honcho -f Procfile.uat start`. Place a one-lot order far from the market, see
@@ -224,13 +221,17 @@ every few seconds, so a change takes effect without a restart:
 
 | Table | What |
 |---|---|
-| `electronx.traders` | Who may trade (`active`), and their ElectronX trader id for SenderSubID(50) |
+| `electronx.users` | Everyone with a login: their ElectronX login (company email) is their id |
+| `electronx.user_roles` | What each does: `trader` (may place orders), `risk`, `management` |
+| `electronx.accounts` | The ElectronX trading accounts (Account, tag 1) and the capacity sent on them |
+| `electronx.account_access` | Which accounts each trader may trade on |
 | `electronx.entitlements` | What each trader may trade, by market and product (`'*'` = any) |
 | `electronx.limits` | Order size and value, open orders, position per contract, max loss |
 
 Entitlements and limits are keyed by trader, market and product, where `'*'` means any; for each
 limit the most specific row wins, and the `('*', '*', '*')` row is the desk default. The rules fail
-closed: anyone not in `traders`, a contract no entitlement covers, or a limit no row sets means the
+closed: anyone not an active user with the trader role and an account, a contract no entitlement
+covers, or a limit no row sets means the
 order is rejected. If SQL Server is unreachable the last rules loaded stay in force. Cancels are never
 blocked.
 
@@ -244,11 +245,32 @@ The same tables can be edited directly in SSMS (not audited; in production, only
 should be able to write them). Examples:
 
     -- let alice trade PJM too
-    INSERT electronx.entitlements (trader_id, market, product) VALUES (N'alice', 'PJM', '*');
+    INSERT electronx.entitlements (trader_id, market, product) VALUES (N'alice@example.test', 'PJM', '*');
     -- at most 5 lots per contract for dave in PJM BFUT100
-    INSERT electronx.limits (trader_id, market, product, max_position) VALUES (N'dave', 'PJM', 'BFUT100', 5);
+    INSERT electronx.limits (trader_id, market, product, max_position)
+        VALUES (N'dave@example.test', 'PJM', 'BFUT100', 5);
     -- stop dave trading (his live orders stay; use Block on the dashboard to cancel them too)
-    UPDATE electronx.traders SET active = 0 WHERE trader_id = N'dave';
+    UPDATE electronx.users SET active = 0 WHERE user_id = N'dave@example.test';
+
+### Users and accounts
+
+A person is known here the way ElectronX knows them: by their ElectronX login, their company email in
+lower case. It is their id in every table, on the sign-in page, and the SenderSubID(50) on every order
+sent for them; ElectronX's reports name them by it (TargetSubID 57), on orders from the ElectronX screen
+too. There is no shared trader id: someone who is not an active user with the trader role cannot send
+an order. Each order goes on an account in `electronx.accounts` they may trade on; with one, that one.
+
+Add and change users on the Trading rules page ("Propose a new user"), with the same two-person
+approval as the rules. In SQL, for example a new trader on the demo account:
+
+    INSERT electronx.users (user_id, display_name) VALUES (N'jane@company.com', N'Jane');
+    INSERT electronx.user_roles (user_id, role) VALUES (N'jane@company.com', 'trader');
+    INSERT electronx.account_access (user_id, account_id) VALUES (N'jane@company.com', 'TA-HURON-00001');
+
+and an account: `INSERT electronx.accounts (account_id, name, capacity) VALUES ('TA-...', N'...', '2')`.
+`seed-dev` adds the test users (alice and dave trade, bob and erin are risk, carol is management, all
+`@example.test`) and the simulator's account. Users sign in with the development login until Google
+sign-in arrives; it lists the active users.
 
 ## Daily P&L
 

@@ -6,7 +6,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from trading_core import KillSwitchState, TraderBlock
-from trading_core.rules import ANY, Limits, Trader, TradingRules
+from trading_core.rules import ANY, Account, Limits, Trader, TradingRules
 from trading_fix import FixMessage, FixSession, SeqStore, SessionConfig
 from trading_orderentry import (
     Instrument,
@@ -44,8 +44,6 @@ class Harness:
         self.sink = MemorySink()
         self.oe = OrderEntryApp(
             self.sink,
-            account="TA-TEST",
-            default_trader="trader@example.com",
             rules=TradingRules.everyone(
                 ["alice", "bob", "dave"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
             ),
@@ -79,7 +77,7 @@ def test_passive_order_rests_on_the_book():
             await wait_for(lambda: order.status == Status.NEW)
             assert order.order_id in h.md.books[SYMBOL]
             msg = h.gw.session(SENDER).received[-1]
-            assert msg.get(50) == "trader@example.com" and msg.get(1) == "TA-TEST" and msg.get(44) == f"{price:.2f}"
+            assert msg.get(50) == "alice" and msg.get(1) == "TA-TEST" and msg.get(44) == f"{price:.2f}"
 
     run(scenario())
 
@@ -220,9 +218,15 @@ def test_trading_rules_decide_who_may_trade_what():
             desk = Limits(max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50)
             h.oe.set_rules(
                 TradingRules(
-                    traders={"alice": Trader("alice"), "dave": Trader("dave", "dave@electronx.example")},
-                    entitlements=frozenset({("alice", "ERCOT", ANY), ("dave", ANY, ANY)}),
+                    traders={
+                        "alice": Trader("alice", accounts=("TA-TEST",)),
+                        "dave@x.com": Trader("dave@x.com", accounts=("TA-2",)),
+                        "tom": Trader("tom"),
+                        "rick": Trader("rick", roles=frozenset({"risk"}), accounts=("TA-TEST",)),
+                    },
+                    entitlements=frozenset({("alice", "ERCOT", ANY), ("dave@x.com", ANY, ANY), ("tom", ANY, ANY)}),
                     limits={(ANY, ANY, ANY): desk, ("alice", "ERCOT", ANY): Limits(max_order_qty=2)},
+                    accounts={"TA-TEST": Account("TA-TEST"), "TA-2": Account("TA-2", capacity="1")},
                 )
             )
             not_entitled = h.oe.submit("alice", pjm, "BUY", 1, 40.0)
@@ -232,9 +236,15 @@ def test_trading_rules_decide_who_may_trade_what():
             too_big = h.oe.submit("alice", SYMBOL, "BUY", 3, h.best(BID) - 1.0)  # alice's own limit is 2
             assert too_big.status == Status.REJECTED and "limit of 2" in too_big.text
 
-            ok = h.oe.submit("dave", SYMBOL, "BUY", 3, h.best(BID) - 1.0)
+            no_account = h.oe.submit("tom", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            assert no_account.status == Status.REJECTED and "no ElectronX account" in no_account.text
+            risk_only = h.oe.submit("rick", SYMBOL, "BUY", 1, h.best(BID) - 1.0)
+            assert risk_only.status == Status.REJECTED and "is not a trader" in risk_only.text
+
+            ok = h.oe.submit("dave@x.com", SYMBOL, "BUY", 3, h.best(BID) - 1.0)
             await wait_for(lambda: ok.status == Status.NEW)
-            assert h.gw.session(SENDER).received[-1].get(50) == "dave@electronx.example"  # from electronx.traders
+            sent = h.gw.session(SENDER).received[-1]
+            assert (sent.get(50), sent.get(1), sent.get(582)) == ("dave@x.com", "TA-2", "1")  # his login and account
             assert h.sent("D") == 1
 
             h.oe.set_rules(
@@ -247,7 +257,7 @@ def test_trading_rules_decide_who_may_trade_what():
 
 
 def test_no_trading_before_the_rules_load():
-    oe = OrderEntryApp(MemorySink(), account="A", default_trader="t")
+    oe = OrderEntryApp(MemorySink())
     order = oe.submit("alice", SYMBOL, "BUY", 1, 40.0)
     assert order.status == Status.REJECTED and "not loaded" in order.text
 
@@ -263,7 +273,7 @@ def test_positions_by_trader():
 
 
 def test_control_endpoint_needs_the_internal_token():
-    oe = OrderEntryApp(MemorySink(), account="A", default_trader="t")
+    oe = OrderEntryApp(MemorySink())
     client = TestClient(create_control_app(oe, TOKEN))
     assert client.get("/orders").status_code == 401
     assert client.get("/orders", headers={"X-Internal-Token": "wrong"}).status_code == 401
@@ -281,14 +291,15 @@ def test_positions_from_the_electronx_screen_count_against_the_position_limit():
         async with Harness() as h:
             h.oe.set_rules(
                 TradingRules(
-                    traders={"alice": Trader("alice", "firms/h/users/alice")},
+                    traders={"alice@x.com": Trader("alice@x.com", accounts=("TA-TEST",))},
                     entitlements=frozenset({(ANY, ANY, ANY)}),
                     limits={(ANY, ANY, ANY): Limits(10, 5000.0, 20, 5, 5000.0)},
+                    accounts={"TA-TEST": Account("TA-TEST")},
                 )
             )
-            h.oe.set_screen_positions({"firms/h/users/alice": {SYMBOL: 4}})
-            too_many = h.oe.submit("alice", SYMBOL, "BUY", 2, 40.0)
-            fits = h.oe.submit("alice", SYMBOL, "SELL", 2, 60.0)
+            h.oe.set_screen_positions({"Alice@x.com": {SYMBOL: 4}})  # her login as the exchange sends it
+            too_many = h.oe.submit("alice@x.com", SYMBOL, "BUY", 2, 40.0)
+            fits = h.oe.submit("alice@x.com", SYMBOL, "SELL", 2, 60.0)
             await asyncio.sleep(0.1)
             assert too_many.status == Status.REJECTED and "position could reach 6" in too_many.text
             assert fits.status != Status.REJECTED
@@ -305,8 +316,6 @@ def test_an_order_loads_its_contract_from_redis():
     redis = FakeAsyncRedis()
     oe = OrderEntryApp(
         MemorySink(),
-        account="TA-TEST",
-        default_trader="trader@example.com",
         rules=TradingRules.everyone(
             ["alice"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
         ),
@@ -331,7 +340,7 @@ def test_every_update_says_what_happened_and_who_did_it():
             sent, ack = [u for u in h.sink.updates if u["cl_ord_id"] == o.cl_ord_id][:2]
             assert (sent["event"], sent["by"], sent["status"]) == ("new_order", "alice", "pending_new")
             assert (sent["account"], sent["capacity"], sent["exchange_user"], sent["ord_type"]) == (
-                "TA-TEST", "2", "trader@example.com", "LIMIT"
+                "TA-TEST", "2", "alice", "LIMIT"
             )  # fmt: skip
             assert sent["event_time"] and sent["manual"] is True
             assert (ack["event"], ack["by"], ack["exec_type"], ack["leaves_qty"]) == (
@@ -425,8 +434,6 @@ class RecordingSession:
 def test_a_session_reject_answers_the_order_or_cancel_it_names():
     oe = OrderEntryApp(
         MemorySink(),
-        account="TA-TEST",
-        default_trader="trader@example.com",
         rules=TradingRules.everyone(
             ["alice"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
         ),

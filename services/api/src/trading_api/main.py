@@ -17,10 +17,18 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocke
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from trading_core import ALERTS_STREAM, BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, TraderBlock, decode_blocks
+from trading_core import (
+    ALERTS_STREAM,
+    BLOCKS_KEY,
+    KILLSWITCH_KEY,
+    KillSwitchState,
+    TraderBlock,
+    TradingRules,
+    decode_blocks,
+)
 from trading_db import follow_rules
 
-from .auth import Authenticator, DevAuthenticator, User
+from .auth import DEV_USERS, Authenticator, DevAuthenticator, User, users_from_rules
 from .hub import ClientFeed, MarketDataHub
 from .order_hub import OrderHub
 from .orderentry_client import OrderEntryClient, OrderEntryError, OrderEntryUnavailable
@@ -69,7 +77,11 @@ def create_app(
 ) -> FastAPI:
     """Build the app. Tests pass their own `redis` (fakeredis), `authenticator` and `orderentry`."""
     settings = settings or Settings.from_env()
-    dev = DevAuthenticator(settings.dev_secret) if settings.dev_login else None
+    # With a database, the users come from electronx.users (they load with the rules); without one,
+    # the built-in test users.
+    dev = (
+        DevAuthenticator(settings.dev_secret, DEV_USERS if settings.db is None else {}) if settings.dev_login else None
+    )
     auth = authenticator or dev
     if auth is None:
         raise ConfigError("no login configured: set API_DEV_LOGIN=Y for development")
@@ -88,8 +100,14 @@ def create_app(
             asyncio.create_task(app.state.hub.refresh_instruments(), name="instruments"),
             asyncio.create_task(app.state.hub.load_quotes(), name="quotes"),
         ]
-        if settings.db is not None:  # who each ElectronX id belongs to, for orders from the ElectronX screen
-            rules = follow_rules(settings.db, app.state.orders.set_rules, settings.rules_refresh_s, appname="api")
+        if settings.db is not None:  # the users (for the sign-in and for orders from the ElectronX screen)
+
+            def on_rules(rules: TradingRules) -> None:
+                app.state.orders.set_rules(rules)
+                if dev is not None:
+                    dev.set_users(users_from_rules(rules))
+
+            rules = follow_rules(settings.db, on_rules, settings.rules_refresh_s, appname="api")
             tasks.append(asyncio.create_task(rules, name="rules"))
         yield
         for task in tasks:
@@ -155,7 +173,7 @@ def create_app(
         async def dev_login(body: DevLoginRequest) -> dict[str, Any]:
             user = dev.users.get(body.user_id)
             if user is None:
-                raise HTTPException(status_code=404, detail=f"no test user {body.user_id}")
+                raise HTTPException(status_code=404, detail=f"no active user {body.user_id}")
             return {"token": dev.issue(user.id), "user": user.to_dict()}
 
     @app.get("/api/me")
@@ -231,7 +249,7 @@ def create_app(
 
     @app.get("/api/exchange-users/unknown")
     async def unknown_exchange_users(user: Annotated[User, Depends(require("risk.view.all"))]) -> list[dict[str, Any]]:
-        """ElectronX users trading on the screen whose ElectronX id no trader here has."""
+        """People trading on the ElectronX screen whose ElectronX login is not a user here."""
         return app.state.orders.unknown_users()
 
     @app.get("/api/positions")

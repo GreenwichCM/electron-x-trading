@@ -15,7 +15,7 @@ import sys
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
-from .attribution import fill_in_traders, traders_without_id, unknown_users
+from .attribution import fill_in_traders, traders_without_account, unknown_users
 from .connection import DbError, connect
 from .migrate import MigrationError, migrate, status
 from .reconcile import SETTLE_S, reconcile
@@ -47,27 +47,27 @@ def main() -> None:
         elif args.command == "check-traders":
             sys.exit(0 if check_traders(settings, args.fill_in) else 1)
         elif seed_dev_rules(settings):
-            print(f"{settings!r}: added starting rules for alice (ERCOT) and dave (PJM)")
+            print(f"{settings!r}: added the test users (alice, bob, carol, dave, erin @example.test) and their rules")
         else:
-            print(f"{settings!r}: electronx.traders already has rows; nothing changed")
+            print(f"{settings!r}: electronx.users already has rows; nothing changed")
     except (ConfigError, MigrationError, *DbError) as exc:  # DbError is a tuple of classes
         sys.exit(f"error: {exc}")
 
 
 def check_traders(settings: DbSettings, fill_in: bool) -> bool:
-    """Orders from the ElectronX screen recorded without a trader, and traders with no ElectronX id.
+    """Orders from the ElectronX screen recorded without a trader, and traders with no ElectronX account.
     True if every screen order has its trader."""
     with closing(connect(settings)) as conn:
         if fill_in:
             changed = fill_in_traders(conn)
             conn.commit()
         unknown = unknown_users(conn)
-        missing = traders_without_id(conn)
+        missing = traders_without_account(conn)
     print(f"{settings!r}")
     if fill_in:
         print(f"  filled in the trader on {changed['orders']} orders and {changed['order_events']} order events")
     if missing:
-        print(f"  active traders with no ElectronX id: {', '.join(missing)}")
+        print(f"  active traders with no ElectronX account to trade on: {', '.join(missing)}")
     if not unknown:
         print("  every order from the ElectronX screen has its trader")
         return True
@@ -75,9 +75,9 @@ def check_traders(settings: DbSettings, fill_in: bool) -> bool:
     for u in unknown:
         last = f"{u.last_seen:%Y-%m-%d %H:%M}" if u.last_seen else "?"
         hint = (
-            f"{u.owner} has this id now: run with --fill-in"
+            f"{u.owner} is a user now: run with --fill-in"
             if u.owner
-            else "no trader has this id: set it on the Trading rules page"
+            else "nobody here has this ElectronX login: add them as a user on the Trading rules page"
         )
         print(f"    {u.exchange_user or '(none sent)'}  {u.orders} orders, last {last} UTC  {hint}")
     return False

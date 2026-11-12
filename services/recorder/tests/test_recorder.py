@@ -175,28 +175,26 @@ def test_run_stops_when_asked(sql_server):
 def test_orders_from_the_electronx_screen_are_recorded_with_their_trader(sql_server):
     migrate(sql_server)
     with closing(connect(sql_server, autocommit=True)) as conn:
-        conn.cursor().execute(
-            "INSERT electronx.traders (trader_id, exchange_trader_id) VALUES (N'dave', 'firms/h/users/dave')"
-        )
+        conn.cursor().execute("INSERT electronx.users (user_id, display_name) VALUES (N'dave@x.com', N'Dave')")
     r = FakeRedis()
     screen = {
         **order("UI-1", 1, "filled", cum_qty=3, trader=""),
         "order_id": "O9",
         "source": "electronx",
-        "exchange_user": "firms/h/users/dave",
+        "exchange_user": "Dave@x.com",  # his login, as the exchange sends it
     }
     add(r, "screen_orders", screen)
-    add(r, "screen_orders", {**screen, "cl_ord_id": "UI-2", "exchange_user": "firms/h/users/nobody"})
-    add(r, "fills", {**fill("E1", "UI-1", 3), "order_id": "O9", "user": "firms/h/users/dave", "manual": True})
+    add(r, "screen_orders", {**screen, "cl_ord_id": "UI-2", "exchange_user": "nobody@x.com"})
+    add(r, "fills", {**fill("E1", "UI-1", 3), "order_id": "O9", "user": "Dave@x.com", "manual": True})
     add(r, "orders", order("A", 1))
     assert drain(make_recorder(r, sql_server)) == 4
     rows = "SELECT cl_ord_id, trader, source, exchange_user FROM electronx.orders ORDER BY cl_ord_id"
     assert query(sql_server, rows) == [
         ("A", "alice", "app", None),
-        ("UI-1", "dave", "electronx", "firms/h/users/dave"),
-        ("UI-2", "", "electronx", "firms/h/users/nobody"),  # no trader has that ElectronX id
+        ("UI-1", "dave@x.com", "electronx", "Dave@x.com"),
+        ("UI-2", "", "electronx", "nobody@x.com"),  # nobody here has that ElectronX login
     ]
-    assert query(sql_server, "SELECT exchange_user, manual FROM electronx.fills") == [("firms/h/users/dave", True)]
+    assert query(sql_server, "SELECT exchange_user, manual FROM electronx.fills") == [("Dave@x.com", True)]
 
 
 def test_the_whole_event_is_recorded(sql_server):

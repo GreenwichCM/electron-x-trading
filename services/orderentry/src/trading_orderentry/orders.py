@@ -55,7 +55,7 @@ def now_iso() -> str:
 @dataclass
 class Order:
     cl_ord_id: str
-    trader: str  # our user id (e.g. alice), not the exchange trader id
+    trader: str  # the trader's user id, which is their ElectronX login (jane@greenwichcm.com)
     symbol: str
     side: str  # BUY or SELL
     qty: int
@@ -70,8 +70,8 @@ class Order:
     updated: str = field(default_factory=now_iso)
     version: int = 0  # +1 on every published update, so an older copy never overwrites a newer one
     account: str = ""  # Account(1) it was sent with
-    exchange_user: str = ""  # SenderSubID(50) it was sent with: the trader's ElectronX id
-    capacity: str = ""  # CustOrderCapacity(582)
+    exchange_user: str = ""  # SenderSubID(50) it was sent with: the trader's ElectronX login
+    capacity: str = ""  # CustOrderCapacity(582), the account's
     ord_type: str = "LIMIT"  # OrdType(40): limit orders only
     manual: bool = True  # ManualOrderIndicator(1028): entered by a person
     busted_qty: int = 0  # lots of its fills the exchange has since cancelled (trade busts)

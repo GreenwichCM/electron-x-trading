@@ -16,15 +16,16 @@ class ConfigError(Exception):
     pass
 
 
+#: Settings from before step 25: each trader's own login and the accounts in SQL Server replace them.
+NO_LONGER_USED = ("OE_DEFAULT_TRADER", "OE_ACCOUNT", "OE_CAPACITY")
+
+
 @dataclass(frozen=True)
 class Settings:
     session: SessionConfig
     tls: TlsConfig | None
     state_dir: Path
-    account: str
-    capacity: str
-    default_trader: str
-    db: DbSettings  # trading rules (entitlements and limits) come from SQL Server
+    db: DbSettings  # users, accounts and the trading rules come from SQL Server
     rules_refresh_s: float
     rate_limit: int
     redis_url: str
@@ -38,7 +39,7 @@ class Settings:
         def get(key: str, default: str = "") -> str:
             return env.get(key, "").strip() or default
 
-        missing = [k for k in ("OE_PASSWORD", "OE_DEFAULT_TRADER", "OE_INTERNAL_TOKEN") if not get(k)]
+        missing = [k for k in ("OE_PASSWORD", "OE_INTERNAL_TOKEN") if not get(k)]
         if missing:
             raise ConfigError(f"not set: {', '.join(missing)} (see services/orderentry/.env.example)")
         if len(get("OE_INTERNAL_TOKEN")) < 32:
@@ -70,9 +71,6 @@ class Settings:
             session=session,
             tls=tls,
             state_dir=Path(get("OE_STATE_DIR", "var/oe")),
-            account=get("OE_ACCOUNT", "TA-HURON-00001"),
-            capacity=get("OE_CAPACITY", "2"),
-            default_trader=get("OE_DEFAULT_TRADER"),
             db=db,
             rules_refresh_s=float(get("RULES_REFRESH_S", "5")),
             rate_limit=int(get("OE_RATE_LIMIT", "90")),

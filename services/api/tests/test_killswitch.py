@@ -17,7 +17,7 @@ class FakeOrderEntry:
     async def positions(self):
         if self.down:
             raise OrderEntryUnavailable("down")
-        return {"alice": {SYMBOL: 2}}
+        return {"alice@example.test": {SYMBOL: 2}}
 
     async def list(self, trader=None):
         return []
@@ -36,15 +36,15 @@ def headers(client, user_id):
 def test_everyone_can_see_the_kill_switch_but_only_risk_can_change_it():
     redis, app = make_app()
     with TestClient(app) as client:
-        assert client.get("/api/killswitch", headers=headers(client, "alice")).json()["active"] is False
-        for user in ("alice", "carol"):
+        assert client.get("/api/killswitch", headers=headers(client, "alice@example.test")).json()["active"] is False
+        for user in ("alice@example.test", "carol@example.test"):
             resp = client.post("/api/killswitch", json={"active": True, "reason": "x"}, headers=headers(client, user))
             assert resp.status_code == 403
-        bob = headers(client, "bob")
+        bob = headers(client, "bob@example.test")
         assert client.post("/api/killswitch", json={"active": True}, headers=bob).status_code == 400  # no reason
         on = client.post("/api/killswitch", json={"active": True, "reason": "fat finger"}, headers=bob).json()
-        assert on["active"] and on["by"] == "bob" and on["reason"] == "fat finger"
-        seen = client.get("/api/killswitch", headers=headers(client, "alice")).json()
+        assert on["active"] and on["by"] == "bob@example.test" and on["reason"] == "fat finger"
+        seen = client.get("/api/killswitch", headers=headers(client, "alice@example.test")).json()
         assert seen["active"] and seen["reason"] == "fat finger"
         assert client.post("/api/killswitch", json={"active": False}, headers=bob).json()["active"] is False
         assert len(client.portal.call(redis.xrange, "alerts")) == 2  # both changes are on record
@@ -55,17 +55,17 @@ def test_positions_are_for_risk_and_management_only():
     with TestClient(app) as client:
         state = {"positions": {SYMBOL: 2}, "connected": True, "time": "t"}
         client.portal.call(redis.set, "dc:positions", json.dumps(state))
-        assert client.get("/api/positions", headers=headers(client, "alice")).status_code == 403
-        for user in ("bob", "carol"):
+        assert client.get("/api/positions", headers=headers(client, "alice@example.test")).status_code == 403
+        for user in ("bob@example.test", "carol@example.test"):
             body = client.get("/api/positions", headers=headers(client, user)).json()
             assert body["exchange"] == {SYMBOL: 2} and body["dropcopy_connected"] is True
-            assert body["by_trader"] == {"alice": {SYMBOL: 2}}
+            assert body["by_trader"] == {"alice@example.test": {SYMBOL: 2}}
 
 
 def test_positions_still_show_the_exchange_side_when_orderentry_is_down():
     _, app = make_app(FakeOrderEntry(down=True))
     with TestClient(app) as client:
-        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        body = client.get("/api/positions", headers=headers(client, "bob@example.test")).json()
         assert body["exchange"] == {} and body["by_trader"] is None
 
 
@@ -76,12 +76,16 @@ def test_settled_contracts_leave_the_positions_check_unless_they_break():
         client.portal.call(redis.set, "dc:positions", json.dumps(state))
         book = {"symbol": SYMBOL, "settlement": {"price": 44.0, "final": True}}
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book))
-        body = client.get("/api/positions", headers=headers(client, "bob")).json()
-        assert body["exchange"] == {} and body["by_trader"] == {"alice": {}} and body["settled"] == {SYMBOL: 44.0}
+        body = client.get("/api/positions", headers=headers(client, "bob@example.test")).json()
+        assert (
+            body["exchange"] == {}
+            and body["by_trader"] == {"alice@example.test": {}}
+            and body["settled"] == {SYMBOL: 44.0}
+        )
 
         state["positions"][SYMBOL] = 3  # the two sides disagree: keep showing it
         client.portal.call(redis.set, "dc:positions", json.dumps(state))
-        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        body = client.get("/api/positions", headers=headers(client, "bob@example.test")).json()
         assert body["exchange"] == {SYMBOL: 3} and body["settled"] == {}
 
 
@@ -96,13 +100,16 @@ def test_trading_on_the_electronx_screen_is_shown_apart_and_is_not_a_break():
             "time": "t",
         }
         client.portal.call(redis.set, "dc:positions", json.dumps(state))
-        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        body = client.get("/api/positions", headers=headers(client, "bob@example.test")).json()
         assert body["exchange"] == {SYMBOL: 5} and body["screen"] == {SYMBOL: 3}
-        assert body["by_trader"] == {"alice": {SYMBOL: 2}} and body["screen_by_user"] == state["screen_by_user"]
+        assert (
+            body["by_trader"] == {"alice@example.test": {SYMBOL: 2}}
+            and body["screen_by_user"] == state["screen_by_user"]
+        )
 
         book = {"symbol": SYMBOL, "settlement": {"price": 44.0, "final": True}}
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book))
-        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        body = client.get("/api/positions", headers=headers(client, "bob@example.test")).json()
         assert body["settled"] == {SYMBOL: 44.0} and body["exchange"] == body["screen"] == body["screen_by_user"] == {}
 
 
@@ -113,5 +120,5 @@ def test_a_fill_not_placed_yet_is_neither_a_match_nor_a_break():
         client.portal.call(redis.set, "dc:positions", json.dumps(state))
         book = {"symbol": SYMBOL, "settlement": {"price": 44.0, "final": True}}
         client.portal.call(redis.set, f"md:last:{SYMBOL}", json.dumps(book))
-        body = client.get("/api/positions", headers=headers(client, "bob")).json()
+        body = client.get("/api/positions", headers=headers(client, "bob@example.test")).json()
         assert body["pending"] == {SYMBOL: 1} and body["settled"] == {}  # not left out while being checked

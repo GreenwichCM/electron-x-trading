@@ -23,7 +23,7 @@ def make_app(**kwargs):
     return redis, create_app(redis=redis, settings=SETTINGS, **kwargs)
 
 
-def login(client, user_id="alice"):
+def login(client, user_id="alice@example.test"):
     token = client.post("/api/dev/login", json={"user_id": user_id}).json()["token"]
     return token, {"Authorization": f"Bearer {token}"}
 
@@ -45,9 +45,9 @@ def test_everything_else_needs_a_valid_token():
 def test_me_shows_role_permissions():
     _, app = make_app()
     with TestClient(app) as client:
-        _, headers = login(client, "bob")
+        _, headers = login(client, "bob@example.test")
         me = client.get("/api/me", headers=headers).json()
-        assert me["id"] == "bob" and me["roles"] == ["risk"]
+        assert me["id"] == "bob@example.test" and me["roles"] == ["risk"]
         assert "killswitch.trip" in me["permissions"] and "orders.trade" not in me["permissions"]
 
 
@@ -60,7 +60,7 @@ def test_unknown_test_user_cannot_log_in():
 def test_missing_permission_is_forbidden():
     class NoMarketData:
         def authenticate(self, token):
-            return User("dave", "Dave", ("nobody",))
+            return User("dave@example.test", "Dave", ("nobody",))
 
     _, app = make_app(authenticator=NoMarketData())
     with TestClient(app) as client:
@@ -108,7 +108,7 @@ def test_websocket_sends_latest_then_live_updates():
         client.portal.call(app.state.hub.ready.wait)
         with client.websocket_connect("/ws/md") as ws:
             ws.send_json({"type": "auth", "token": token})
-            assert ws.receive_json()["user"]["id"] == "alice"
+            assert ws.receive_json()["user"]["id"] == "alice@example.test"
             assert ws.receive_json() == {"type": "book", "data": book(40.0, 40.5)}
             client.portal.call(redis.publish, f"md.{SYMBOL}", json.dumps(book(40.25, 40.5)))
             assert ws.receive_json()["data"]["bid"] == 40.25

@@ -13,7 +13,7 @@ settles SIM_SETTLE_AFTER_S (30) seconds later, to try out expiry and settlement.
 SIM_TLS_CERT, SIM_TLS_KEY and SIM_TLS_CA make both gateways require mutual TLS like the real ones: the
 simulator's own certificate and key, and the CA that client certificates must be signed by.
 
-SIM_SCREEN_USERS (comma-separated ElectronX trader ids) has those traders place a small order on the
+SIM_SCREEN_USERS (comma-separated ElectronX logins) has those traders place a small order on the
 "ElectronX screen" every SIM_SCREEN_EVERY_S (60) seconds: no FIX session sends it, only the drop copy
 reports it, as for orders traders enter on the exchange's own screen.
 

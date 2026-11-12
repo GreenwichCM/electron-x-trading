@@ -3,10 +3,13 @@ import { api, type User } from "./auth";
 import { usePolling } from "./usePolling";
 
 type Key = { trader_id: string; market: string; product: string };
-type TraderRow = { trader_id: string; exchange_trader_id: string | null; active: boolean; note: string };
+/** A person: their id is their ElectronX login (company email), the same id ElectronX knows them by. */
+type UserRow = { user_id: string; name: string; active: boolean; note: string; roles: string[]; accounts: string[] };
+type AccountRow = { account_id: string; name: string; capacity: string; active: boolean };
 type LimitRow = Key & Record<LimitName, number | null>;
 type RulesData = {
-  traders: TraderRow[];
+  users: UserRow[];
+  accounts: AccountRow[];
   entitlements: Key[];
   limits: LimitRow[];
   can_edit: boolean;
@@ -26,8 +29,9 @@ type Change = Key & {
   decided_at: string | null;
   decision_note: string;
 };
-type Kind = "trader" | "entitlement" | "limit";
-type Draft = Key & { kind: Kind; action: "set" | "delete"; values: Record<string, string | boolean>; reason: string };
+type Kind = "user" | "entitlement" | "limit";
+type Value = string | boolean | string[];
+type Draft = Key & { kind: Kind; action: "set" | "delete"; values: Record<string, Value>; reason: string };
 
 const LIMITS = {
   max_order_qty: "Max lots per order",
@@ -40,8 +44,20 @@ type LimitName = keyof typeof LIMITS;
 const LIMIT_NAMES = Object.keys(LIMITS) as LimitName[];
 const PER_TRADER: LimitName[] = ["max_open_orders", "max_loss"];
 const MARKETS = ["*", "ERCOT", "PJM", "MISO", "CAISO", "SPP", "ISONE", "NYISO"];
+const ROLES = ["trader", "risk", "management"];
 
-const show = (v: unknown) => (v == null || v === "" ? "not set" : v === true ? "yes" : v === false ? "no" : String(v));
+const show = (v: unknown) =>
+  Array.isArray(v)
+    ? v.length
+      ? v.join(", ")
+      : "none"
+    : v == null || v === ""
+      ? "not set"
+      : v === true
+        ? "yes"
+        : v === false
+          ? "no"
+          : String(v);
 const when = (iso: string | null) => (iso ? new Date(iso + (iso.endsWith("Z") ? "" : "Z")).toLocaleString() : "");
 const scope = (k: Key) => (k.market === "*" && k.product === "*" ? "everything" : `${k.market} ${k.product}`);
 
@@ -59,10 +75,23 @@ function describe(c: Change): string {
   return `${c.before === null ? "add" : "change"} ${c.kind} ${who}${c.kind === "limit" ? ` · ${scope(c)}` : ""}: ${diff}`;
 }
 
-function ChangeForm({ draft, setDraft, onSent }: { draft: Draft; setDraft: (d: Draft | null) => void; onSent: () => void }) {
+function ChangeForm({
+  draft,
+  setDraft,
+  onSent,
+  accounts,
+}: {
+  draft: Draft;
+  setDraft: (d: Draft | null) => void;
+  onSent: () => void;
+  accounts: AccountRow[];
+}) {
   const [error, setError] = useState("");
   const set = (patch: Partial<Draft>) => setDraft({ ...draft, ...patch });
-  const value = (name: string, v: string | boolean) => set({ values: { ...draft.values, [name]: v } });
+  const value = (name: string, v: Value) => set({ values: { ...draft.values, [name]: v } });
+  const list = (name: string) => (Array.isArray(draft.values[name]) ? (draft.values[name] as string[]) : []);
+  const toggle = (name: string, item: string, on: boolean) =>
+    value(name, on ? [...list(name), item] : list(name).filter((x) => x !== item));
   const allScope = draft.market === "*" && draft.product === "*";
   const submit = async () => {
     try {
@@ -79,10 +108,14 @@ function ChangeForm({ draft, setDraft, onSent }: { draft: Draft; setDraft: (d: D
         Propose: {draft.action === "delete" ? "remove" : "set"} {draft.kind}
       </h3>
       <label>
-        Trader
-        <input value={draft.trader_id} placeholder={draft.kind === "trader" ? "user id" : "user id, or * for everyone"} onChange={(e) => set({ trader_id: e.target.value })} />
+        {draft.kind === "user" ? "ElectronX login (company email)" : "User"}
+        <input
+          value={draft.trader_id}
+          placeholder={draft.kind === "user" ? "jane@company.com" : "their email, or * for everyone"}
+          onChange={(e) => set({ trader_id: e.target.value })}
+        />
       </label>
-      {draft.kind !== "trader" && (
+      {draft.kind !== "user" && (
         <>
           <label>
             Market
@@ -98,15 +131,39 @@ function ChangeForm({ draft, setDraft, onSent }: { draft: Draft; setDraft: (d: D
           </label>
         </>
       )}
-      {draft.action === "set" && draft.kind === "trader" && (
+      {draft.action === "set" && draft.kind === "user" && (
         <>
           <label>
-            ElectronX trader id
-            <input value={String(draft.values.exchange_trader_id ?? "")} placeholder="blank: the default" onChange={(e) => value("exchange_trader_id", e.target.value)} />
+            Name
+            <input value={String(draft.values.name ?? "")} onChange={(e) => value("name", e.target.value)} />
           </label>
+          <fieldset className="choices">
+            <legend>Roles</legend>
+            {ROLES.map((r) => (
+              <label key={r} className="check">
+                <input type="checkbox" checked={list("roles").includes(r)} onChange={(e) => toggle("roles", r, e.target.checked)} />
+                {r}
+              </label>
+            ))}
+          </fieldset>
+          <fieldset className="choices">
+            <legend>ElectronX accounts they may trade on</legend>
+            {accounts.map((a) => (
+              <label key={a.account_id} className="check">
+                <input
+                  type="checkbox"
+                  checked={list("accounts").includes(a.account_id)}
+                  onChange={(e) => toggle("accounts", a.account_id, e.target.checked)}
+                />
+                {a.account_id}
+                {a.name ? ` (${a.name})` : ""}
+              </label>
+            ))}
+            {accounts.length === 0 && <span className="qty">none in electronx.accounts yet</span>}
+          </fieldset>
           <label className="check">
             <input type="checkbox" checked={draft.values.active !== false} onChange={(e) => value("active", e.target.checked)} />
-            May trade
+            Active (may sign in and trade)
           </label>
           <label>
             Note
@@ -241,33 +298,46 @@ export default function Rules({ user }: { user: User }) {
         * means any. For each limit the most specific row wins; a limit no row sets blocks trading.
         {edit && " Changes take effect once a second person approves them."}
       </p>
-      <div className="rules-grid">
-        <table>
-          <thead>
-            <tr>
-              <th>Trader</th>
-              <th>ElectronX id</th>
-              <th>May trade</th>
-              {edit && <th />}
+      <table className="users">
+        <thead>
+          <tr>
+            <th>User (ElectronX login)</th>
+            <th>Name</th>
+            <th>Roles</th>
+            <th>Accounts</th>
+            <th>Active</th>
+            {edit && <th />}
+          </tr>
+        </thead>
+        <tbody>
+          {rules.users.map((u) => (
+            <tr key={u.user_id} className={u.active ? "" : "stale"}>
+              <td title={u.note}>{u.user_id}</td>
+              <td>{u.name}</td>
+              <td>{show(u.roles)}</td>
+              <td className="qty">{show(u.accounts)}</td>
+              <td>{u.active ? "yes" : "no"}</td>
+              {edit && (
+                <td>
+                  <button
+                    className="link"
+                    onClick={() =>
+                      start({
+                        ...blank("user"),
+                        trader_id: u.user_id,
+                        values: { name: u.name, roles: u.roles, accounts: u.accounts, active: u.active, note: u.note },
+                      })
+                    }
+                  >
+                    Change
+                  </button>
+                </td>
+              )}
             </tr>
-          </thead>
-          <tbody>
-            {rules.traders.map((t) => (
-              <tr key={t.trader_id} className={t.active ? "" : "stale"}>
-                <td title={t.note}>{t.trader_id}</td>
-                <td className="qty">{t.exchange_trader_id ?? "default"}</td>
-                <td>{t.active ? "yes" : "no"}</td>
-                {edit && (
-                  <td>
-                    <button className="link" onClick={() => start({ ...blank("trader"), trader_id: t.trader_id, values: { exchange_trader_id: t.exchange_trader_id ?? "", active: t.active, note: t.note } })}>
-                      Change
-                    </button>
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          ))}
+        </tbody>
+      </table>
+      <div className="rules-grid">
         <table>
           <thead>
             <tr>
@@ -349,6 +419,7 @@ export default function Rules({ user }: { user: User }) {
         (draft ? (
           <ChangeForm
             draft={draft}
+            accounts={rules.accounts}
             setDraft={setDraft}
             onSent={() => {
               setDraft(null);
@@ -358,8 +429,8 @@ export default function Rules({ user }: { user: User }) {
         ) : (
           <div className="buttons">
             <span className="qty">Propose a new </span>
-            <button className="link" onClick={() => start(blank("trader"))}>
-              trader
+            <button className="link" onClick={() => start({ ...blank("user"), values: { roles: ["trader"], accounts: [] } })}>
+              user
             </button>
             <button className="link" onClick={() => start(blank("entitlement"))}>
               entitlement

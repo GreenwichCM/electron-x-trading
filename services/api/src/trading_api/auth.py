@@ -1,7 +1,9 @@
 """Who the caller is (authentication) and what they may do (permissions).
 
-Only the Authenticator changes when the company login (Entra ID or AD) arrives: it turns a token
-into a User. Everything after that point, the roles, permissions and checks, stays the same.
+A user's id is their ElectronX login, their company email in lower case; their name and roles come from
+electronx.users and user_roles in SQL Server. Only the Authenticator changes when Google sign-in arrives:
+it turns a token into a User. Everything after that point, the roles, permissions and checks, stays the
+same.
 """
 
 from __future__ import annotations
@@ -11,8 +13,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import jwt
+from trading_core import TradingRules
 
-#: Role -> permissions. Moves to SQL Server (role_permissions) later; the names stay the same.
+#: Role -> permissions. Who has which role is in SQL Server (electronx.user_roles).
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "trader": frozenset({"md.view", "orders.view.own", "orders.trade", "risk.view.own", "risk.view.desk_aggregate"}),
     "risk": frozenset(
@@ -57,13 +60,26 @@ class Authenticator(Protocol):
         ...
 
 
+#: The test users when there is no database (the api's own tests); otherwise electronx.users has them.
 DEV_USERS: dict[str, User] = {
-    "alice": User("alice", "Alice (trader)", ("trader",)),
-    "bob": User("bob", "Bob (risk)", ("risk",)),
-    "carol": User("carol", "Carol (management)", ("management",)),
-    "dave": User("dave", "Dave (trader)", ("trader",)),
-    "erin": User("erin", "Erin (risk)", ("risk",)),  # a second risk user, to approve bob's changes
+    u.id: u
+    for u in (
+        User("alice@example.test", "Alice (trader)", ("trader",)),
+        User("bob@example.test", "Bob (risk)", ("risk",)),
+        User("carol@example.test", "Carol (management)", ("management",)),
+        User("dave@example.test", "Dave (trader)", ("trader",)),
+        User("erin@example.test", "Erin (risk)", ("risk",)),  # a second risk user, to approve bob's changes
+    )
 }
+
+
+def users_from_rules(rules: TradingRules) -> dict[str, User]:
+    """Everyone active in electronx.users, with their roles."""
+    return {
+        t.trader_id: User(t.trader_id, t.name or t.trader_id, tuple(sorted(t.roles)))
+        for t in rules.traders.values()
+        if t.active
+    }
 
 
 class DevAuthenticator:
@@ -79,6 +95,10 @@ class DevAuthenticator:
         self.secret = secret
         self.users = users
         self.ttl_s = ttl_s
+
+    def set_users(self, users: dict[str, User]) -> None:
+        """Who may sign in from now on; a token of someone no longer here stops working."""
+        self.users = users
 
     def issue(self, user_id: str) -> str:
         now = int(time.time())

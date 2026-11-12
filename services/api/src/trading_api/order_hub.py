@@ -2,14 +2,14 @@
 sends each update only to browsers allowed to see it (the trader's own orders, or everyone's for risk and
 management).
 
-Orders entered on the ElectronX screen come only from the drop copy. They carry the trader's ElectronX id
-(`exchange_user`), not our trader id, so the hub looks the trader up in the trading rules
-(electronx.traders.exchange_trader_id). Their times are FIX timestamps; the hub gives them ISO 8601 times
+Orders entered on the ElectronX screen come only from the drop copy. They carry the trader's ElectronX login
+(`exchange_user`), which is their user id here in lower case, if they are a user (electronx.users).
+Their times are FIX timestamps; the hub gives them ISO 8601 times
 like orderentry's, so the blotter can sort and show both alike. Our own orders are listed by orderentry;
 the hub keeps every order from the screen it has seen (the stream from its start).
 
-An ElectronX id no trader here has (unknown_users) is logged once and listed on the dashboard for risk:
-those orders have no trader until someone is given that id on the Trading rules page.
+An ElectronX login nobody here has (unknown_users) is logged once and listed on the dashboard for risk:
+those orders have no trader until that person is added as a user on the Trading rules page.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ class OrderHub:
         self.clients.pop(feed, None)
 
     def set_rules(self, rules: TradingRules) -> None:
-        """The trading rules, for who each ElectronX id belongs to."""
+        """The trading rules, for which ElectronX logins are users here."""
         self.rules = rules
 
     def screen_row(self, raw: Order) -> Order:
@@ -89,7 +89,7 @@ class OrderHub:
         return [r for r in rows if trader is None or r["trader"] == trader]
 
     def unknown_users(self) -> list[dict[str, Any]]:
-        """ElectronX users with orders from the screen whose id no trader here has: [{exchange_user,
+        """ElectronX logins with orders from the screen that are nobody here: [{exchange_user,
         orders, last}], most recent first. Empty until the rules are loaded, so that nobody is reported
         just because the rules are not known yet."""
         if self.rules is None:
@@ -114,8 +114,8 @@ class OrderHub:
         if self.rules is not None and user not in self._warned and not self.rules.trader_for(user):
             self._warned.add(user)
             log.warning(
-                "orders from the ElectronX screen by %s, an ElectronX id no trader here has: they have no "
-                "trader until someone is given it on the Trading rules page",
+                "orders from the ElectronX screen by %s, an ElectronX login nobody here has: they have no "
+                "trader until that person is added as a user on the Trading rules page",
                 user or "(no TargetSubID)",
             )
         return True

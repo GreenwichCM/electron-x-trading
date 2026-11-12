@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, setToken, type User } from "./auth";
 
-/** Development login: pick a test user. Replaced by the company sign-in (Entra ID or AD) later. */
+/** Development login: pick a user from electronx.users. Replaced by Google sign-in later. */
 export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [users, setUsers] = useState<User[]>([]);
   const [error, setError] = useState("");
@@ -28,7 +28,7 @@ export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
   return (
     <main className="login">
       <h1>Sign in</h1>
-      <p className="hint">Development login: choose a test user.</p>
+      <p className="hint">Development login: choose a user.</p>
       <div className="users">
         {users.map((u) => (
           <button key={u.id} onClick={() => signIn(u.id)}>

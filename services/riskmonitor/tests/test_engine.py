@@ -114,24 +114,24 @@ def test_streams_snapshot_and_automatic_block_through_redis():
     asyncio.run(asyncio.wait_for(scenario(), 10))
 
 
-def test_fills_from_the_electronx_screen_go_to_the_trader_with_that_electronx_id():
+def test_fills_from_the_electronx_screen_go_to_the_user_with_that_electronx_login():
     clock = Clock()
     e = RiskEngine(clock=clock)
-    traders = {"alice": Trader("alice", "firms/h/users/alice"), "dave": Trader("dave")}
+    traders = {"alice@x.com": Trader("alice@x.com"), "dave@x.com": Trader("dave@x.com")}
     e.set_rules(TradingRules(traders=traders, entitlements=frozenset(), limits={}))
-    e.on_order(order("A1", "alice"))
+    e.on_order(order("A1", "alice@x.com"))
     e.on_fill(fill("E1", "A1", "BUY", 2, 40.0))  # sent from our app
-    e.on_fill({**fill("E2", "UI-1", "BUY", 3, 41.0), "user": "firms/h/users/alice"})  # from the screen
-    e.on_fill({**fill("E3", "UI-2", "SELL", 1, 41.0), "user": "firms/h/users/nobody"})
+    e.on_fill({**fill("E2", "UI-1", "BUY", 3, 41.0), "user": "Alice@x.com"})  # from the screen, her login
+    e.on_fill({**fill("E3", "UI-2", "SELL", 1, 41.0), "user": "nobody@x.com"})
     e.on_book(book(41.0, 41.5))
     snap = e.snapshot()
-    assert snap["traders"]["alice"]["positions"][X]["qty"] == 2 and snap["unattributed_fills"] == 2
+    assert snap["traders"]["alice@x.com"]["positions"][X]["qty"] == 2 and snap["unattributed_fills"] == 2
 
     clock.now += 5  # orderentry never published those orders: they came from the screen
     snap = e.snapshot()
-    p = snap["traders"]["alice"]["positions"][X]
+    p = snap["traders"]["alice@x.com"]["positions"][X]
     assert (p["qty"], p["screen_qty"]) == (5, 3)
-    assert snap["unattributed_fills"] == 1  # nobody has that ElectronX id
+    assert snap["unattributed_fills"] == 1  # that ElectronX login is nobody here
 
 
 def test_only_the_contracts_held_are_read_again():

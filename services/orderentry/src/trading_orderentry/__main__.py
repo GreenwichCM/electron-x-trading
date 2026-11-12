@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -23,7 +24,7 @@ from .app import OrderEntryApp
 from .control import create_control_app
 from .recovery import Recovered, recover, save_state
 from .risk import Instrument, Throttle
-from .settings import ConfigError, Settings
+from .settings import NO_LONGER_USED, ConfigError, Settings
 from .sink import RedisOrderSink
 
 log = logging.getLogger("oe")
@@ -145,13 +146,14 @@ async def main() -> None:
     rec = recovering.result()
 
     sink = RedisOrderSink(redis)
-    oe = OrderEntryApp(
-        sink,
-        account=settings.account,
-        default_trader=settings.default_trader,
-        throttle=Throttle(settings.rate_limit),
-        capacity=settings.capacity,
-    )
+    old = [k for k in NO_LONGER_USED if os.environ.get(k, "").strip()]
+    if old:
+        log.warning(
+            "%s no longer used: each order goes out under the trader's own ElectronX login, on an account in "
+            "electronx.accounts they may trade on (remove them from the .env files)",
+            ", ".join(old),
+        )
+    oe = OrderEntryApp(sink, throttle=Throttle(settings.rate_limit))
     oe.restore(rec, from_earlier_week=rec.from_earlier_week())
     ssl_context = build_ssl_context(settings.tls) if settings.tls else None
     server_name = settings.tls.server_name if settings.tls else None

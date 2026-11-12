@@ -101,7 +101,7 @@ def execution_report(cl, exec_type, status, cum_qty, orig=None):
 
 
 def restored_app(*orders):
-    oe = OrderEntryApp(MemorySink(), account="A", default_trader="t")
+    oe = OrderEntryApp(MemorySink())
     rec = Recovered()
     for o in orders:
         apply(rec, o)
@@ -150,8 +150,6 @@ class OrderEntry:
         self.sink = RedisOrderSink(redis)
         self.app = OrderEntryApp(
             self.sink,
-            account="TA-TEST",
-            default_trader="trader@example.com",
             rules=TradingRules.everyone(
                 ["alice"], max_order_qty=10, max_order_notional=5000, max_open_orders=20, max_position=50
             ),

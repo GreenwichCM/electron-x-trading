@@ -3,8 +3,8 @@
 Fills come from dropcopy (the exchange's record) and carry a ClOrdID but no trader; the trader is
 found from orderentry's `orders` stream. A fill whose order is not known yet waits until it is. If it
 is still unknown after SCREEN_AFTER_S, the order was entered on the ElectronX screen: the fill goes to
-the trader whose ElectronX trader id (electronx.traders.exchange_trader_id) is the fill's `user`, the
-TargetSubID(57) on the drop copy. A fill whose user matches no trader stays unattributed.
+the user whose id is the fill's `user` (their ElectronX login, the TargetSubID(57) on the drop copy, in
+lower case). A fill whose login is nobody here stays unattributed.
 
 A trade bust (a fill with `bust` set) undoes its fill: it is applied as the opposite trade at the
 same price, which takes the position back and leaves the P&L as if the trade had never happened.

@@ -448,3 +448,22 @@ th.sortable:hover {
   padding-left: 18px;
   font-size: 13px;
 }
+
+/* ---- users on the Trading rules page ---- */
+table.users {
+  margin-bottom: 16px;
+}
+fieldset.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+fieldset.choices legend {
+  color: var(--muted);
+  padding: 0 4px;
+}

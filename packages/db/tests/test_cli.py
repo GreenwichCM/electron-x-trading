@@ -44,14 +44,14 @@ def test_check_traders_lists_screen_orders_without_a_trader(sql_server, capsys):
         cur.execute(
             "INSERT electronx.orders (cl_ord_id, version, trader, symbol, side, qty, price, tif, status, order_id,"
             " cum_qty, avg_px, message, last_stream_id, source, exchange_user) VALUES ('UI-1', 1, N'', 'S', 'BUY',"
-            " 1, 45, 'DAY', 'new', 'O1', 0, 0, '', '1-0', 'electronx', 'd@x.com')"
+            " 1, 45, 'DAY', 'new', 'O1', 0, 0, '', '1-0', 'electronx', 'D@x.com')"
         )
         conn.commit()
     assert not check_traders(sql_server, fill_in=False)
     out = capsys.readouterr().out
-    assert "d@x.com  1 orders" in out and "no trader has this id" in out
+    assert "D@x.com  1 orders" in out and "nobody here has this ElectronX login" in out
     with closing(connect(sql_server)) as conn:
-        conn.cursor().execute("UPDATE electronx.traders SET exchange_trader_id = 'd@x.com' WHERE trader_id = N'dave'")
+        conn.cursor().execute("INSERT electronx.users (user_id, display_name) VALUES (N'd@x.com', N'D')")
         conn.commit()
     assert check_traders(sql_server, fill_in=True)
     out = capsys.readouterr().out

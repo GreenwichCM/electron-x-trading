@@ -37,7 +37,7 @@ log = logging.getLogger("api.rules")
 
 
 class ChangeRequest(BaseModel):
-    kind: Literal["trader", "entitlement", "limit"]
+    kind: Literal["user", "entitlement", "limit"]
     action: Literal["set", "delete"] = "set"
     trader_id: str
     market: str = ANY
@@ -81,7 +81,7 @@ def add_rule_routes(
             raise HTTPException(status_code=403, detail="missing permission risk.view.all")
         found = await with_db(current_rules)
         if not sees_all:
-            found["traders"] = [t for t in found["traders"] if t["trader_id"] == user.id]
+            found["users"] = [u for u in found["users"] if u["user_id"] == user.id]
             for table in ("entitlements", "limits"):
                 found[table] = [r for r in found[table] if r["trader_id"] in (user.id, ANY)]
         return found | {"can_edit": user.can("limits.edit"), "can_approve": user.can("limits.approve")}

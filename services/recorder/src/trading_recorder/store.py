@@ -15,10 +15,10 @@ ORDER_COLUMNS = (
     "cl_ord_id, version, trader, symbol, side, qty, price, tif, status, order_id, cum_qty, avg_px, "
     "message, created_at, updated_at, source, exchange_user, busted_qty"
 )
-# An order from the ElectronX screen has no trader: it belongs to whoever has its ElectronX id, if only one does.
+# An order from the ElectronX screen has no trader: it belongs to the user whose id is its ElectronX login.
 TRADER = (
-    "COALESCE(NULLIF(%(trader)s, N''), (SELECT CASE WHEN COUNT(*) = 1 THEN MIN(trader_id) END "
-    "FROM electronx.traders WHERE exchange_trader_id = %(exchange_user)s), N'')"
+    "COALESCE(NULLIF(%(trader)s, N''), "
+    "(SELECT user_id FROM electronx.users WHERE user_id = LOWER(%(exchange_user)s)), N'')"
 )
 ORDER_VALUES = (
     f"%(cl_ord_id)s, %(version)s, {TRADER}, %(symbol)s, %(side)s, %(qty)s, %(price)s, %(tif)s, %(status)s, "

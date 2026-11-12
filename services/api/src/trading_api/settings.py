@@ -26,7 +26,7 @@ class Settings:
     oe_url: str = "http://127.0.0.1:8100"
     oe_token: str = ""
     db: DbSettings | None = None  # services/db.env; without it the trading rules pages answer 503
-    rules_refresh_s: float = 10.0  # how often the trading rules are reloaded (who has which ElectronX id)
+    rules_refresh_s: float = 10.0  # how often the users and trading rules are reloaded
 
     def __post_init__(self) -> None:
         if self.dev_login and self.host not in LOOPBACK:

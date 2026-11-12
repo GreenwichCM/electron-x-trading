@@ -1,6 +1,6 @@
 """Changes to the trading rules, made from the app: proposed by one person, approved by another.
 
-Nobody changes electronx.traders, entitlements or limits from the app directly. A change is proposed
+Nobody changes electronx.users, entitlements or limits from the app directly. A change is proposed
 (propose), recording the rule as it is now and as it would be. Only someone else may approve it
 (approve), which applies it in the same transaction and marks it approved; it can also be rejected,
 or withdrawn by whoever proposed it. Everything stays in electronx.rule_changes as the audit trail.
@@ -8,8 +8,10 @@ or withdrawn by whoever proposed it. Everything stays in electronx.rule_changes 
 If the rule was changed after a proposal (by another approved change, or in SSMS), approving it would
 silently undo that, so the proposal becomes 'stale' instead: propose it again from the current rule.
 
-Each ElectronX trader id belongs to one trader at most. Approving one also gives that trader the
-orders from the ElectronX screen already recorded under it without a trader (attribution.py).
+A user is a person: their id is their ElectronX login (company email, lower case), and the change says
+their name, roles, the ElectronX accounts they may trade on, and whether they are active. Approving a
+user also gives them the orders from the ElectronX screen already recorded under their login without
+a trader (attribution.py).
 """
 
 from __future__ import annotations
@@ -20,17 +22,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from trading_core import Market
-from trading_core.rules import ANY, LIMIT_NAMES, TRADER_WIDE
+from trading_core.rules import ANY, LIMIT_NAMES, ROLES, TRADER_WIDE
 
 from .attribution import fill_in_traders
 from .connection import Connection
 from .migrate import SCHEMA
 
-KINDS = ("trader", "entitlement", "limit")
+KINDS = ("user", "entitlement", "limit")
 MARKETS = {m.value for m in Market} | {ANY}
 PRODUCT = re.compile(r"^(\*|(BFUT|BOPT)\d*)$")
 WHOLE_LOTS = ("max_order_qty", "max_open_orders", "max_position")
-TRADER_FIELDS = ("exchange_trader_id", "active", "note")
+USER_FIELDS = ("name", "active", "roles", "accounts", "note")
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class ChangeError(Exception):
@@ -43,12 +46,12 @@ class ChangeError(Exception):
 
 @dataclass(frozen=True)
 class ProposedChange:
-    kind: str  # trader, entitlement or limit
+    kind: str  # user, entitlement or limit
     action: str  # set (add or change) or delete
-    trader_id: str  # or "*" (every trader) for entitlements and limits
+    trader_id: str  # the user's id (their ElectronX login), or "*" (everyone) for entitlements and limits
     market: str = ANY
     product: str = ANY
-    values: dict[str, Any] = field(default_factory=dict)  # trader: TRADER_FIELDS; limit: the limits
+    values: dict[str, Any] = field(default_factory=dict)  # user: USER_FIELDS; limit: the limits
     reason: str = ""
 
 
@@ -59,25 +62,21 @@ def validate(change: ProposedChange) -> ProposedChange:
         raise ChangeError(400, f"kind must be one of {', '.join(KINDS)}")
     if action not in ("set", "delete"):
         raise ChangeError(400, "action must be set or delete")
-    trader = change.trader_id.strip()
+    trader = change.trader_id.strip().lower()  # ids are ElectronX logins, kept in lower case
     if not trader or len(trader) > 128:
         raise ChangeError(400, "trader_id is required (at most 128 characters)")
+    if trader != ANY and not EMAIL.match(trader):
+        raise ChangeError(400, "a user's id is their company email, which is also their ElectronX login")
     reason = change.reason.strip()
     if not reason:
         raise ChangeError(400, "give a reason: it is kept with the change")
     market, product = change.market.strip().upper(), change.product.strip().upper()
     values = dict(change.values)
-    if kind == "trader":
+    if kind == "user":
         if trader == ANY:
-            raise ChangeError(400, "a trader needs a real user id, not *")
+            raise ChangeError(400, "a user needs their own id, not *")
         market = product = ANY
-        unknown = set(values) - set(TRADER_FIELDS)
-        if unknown:
-            raise ChangeError(400, f"unknown fields for a trader: {', '.join(sorted(unknown))}")
-        if "active" in values:
-            values["active"] = bool(values["active"])
-        if values.get("exchange_trader_id") is not None:
-            values["exchange_trader_id"] = str(values["exchange_trader_id"]).strip() or None
+        values = _user_values(values)
     else:
         if market not in MARKETS:
             raise ChangeError(400, f"market must be one of {', '.join(sorted(MARKETS))}")
@@ -88,6 +87,33 @@ def validate(change: ProposedChange) -> ProposedChange:
     if kind == "limit":
         values = _limit_values(values, market, product, action)
     return ProposedChange(kind, action, trader, market, product, values if action == "set" else {}, reason[:400])
+
+
+def _names(value: Any) -> list[str]:
+    """A list of names from a list or a comma-separated string, tidied and without repeats."""
+    items = value.split(",") if isinstance(value, str) else list(value or [])
+    return sorted({str(v).strip() for v in items if str(v).strip()})
+
+
+def _user_values(values: dict[str, Any]) -> dict[str, Any]:
+    unknown = set(values) - set(USER_FIELDS)
+    if unknown:
+        raise ChangeError(400, f"unknown fields for a user: {', '.join(sorted(unknown))}")
+    out = dict(values)
+    if "active" in out:
+        out["active"] = bool(out["active"])
+    if "name" in out:
+        out["name"] = str(out["name"] or "").strip()[:128]
+    if "note" in out:
+        out["note"] = str(out["note"] or "").strip()[:400]
+    if "roles" in out:
+        out["roles"] = [r.lower() for r in _names(out["roles"])]
+        bad = set(out["roles"]) - set(ROLES)
+        if bad:
+            raise ChangeError(400, f"roles are {', '.join(ROLES)}, not {', '.join(sorted(bad))}")
+    if "accounts" in out:
+        out["accounts"] = [a.upper() for a in _names(out["accounts"])]
+    return out
 
 
 def _limit_values(values: dict[str, Any], market: str, product: str, action: str) -> dict[str, Any]:
@@ -130,13 +156,19 @@ def _current(conn: Connection, kind: str, key: dict[str, str], lock: bool = Fals
     """The rule as it is now, as a plain dict, or None if there is none."""
     hint = " WITH (UPDLOCK, HOLDLOCK)" if lock else ""  # held until commit, so nobody changes it meanwhile
     cur = conn.cursor()
-    if kind == "trader":
+    if kind == "user":
+        cur.execute(f"SELECT display_name, active, note FROM {SCHEMA}.users{hint} WHERE user_id = %(trader_id)s", key)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cur.execute(f"SELECT role FROM {SCHEMA}.user_roles{hint} WHERE user_id = %(trader_id)s ORDER BY role", key)
+        roles = [r[0] for r in cur.fetchall()]
         cur.execute(
-            f"SELECT exchange_trader_id, active, note FROM {SCHEMA}.traders{hint} WHERE trader_id = %(trader_id)s",
+            f"SELECT account_id FROM {SCHEMA}.account_access{hint} WHERE user_id = %(trader_id)s ORDER BY account_id",
             key,
         )
-        row = cur.fetchone()
-        return None if row is None else {"exchange_trader_id": row[0], "active": bool(row[1]), "note": row[2]}
+        accounts = [r[0] for r in cur.fetchall()]
+        return {"name": row[0], "active": bool(row[1]), "roles": roles, "accounts": accounts, "note": row[2]}
     where = "trader_id = %(trader_id)s AND market = %(market)s AND product = %(product)s"
     if kind == "entitlement":
         cur.execute(f"SELECT 1 FROM {SCHEMA}.entitlements{hint} WHERE {where}", key)
@@ -154,37 +186,43 @@ def _current(conn: Connection, kind: str, key: dict[str, str], lock: bool = Fals
 def _after(change: ProposedChange, before: dict[str, Any] | None) -> dict[str, Any] | None:
     if change.action == "delete":
         return None
-    if change.kind == "trader":
-        base = before or {"exchange_trader_id": None, "active": True, "note": ""}
-        return base | change.values
+    if change.kind == "user":
+        name = change.trader_id.split("@")[0]
+        base = before or {"name": name, "active": True, "roles": [], "accounts": [], "note": ""}
+        after = base | change.values
+        after["name"] = after["name"] or name
+        return after
     if change.kind == "entitlement":
         return {}
     return dict(change.values)  # a limit row becomes exactly the values given; blank ones are not set
 
 
-def _check_id_free(conn: Connection, trader_id: str, after: dict[str, Any] | None) -> None:
-    """ChangeError(409) if another trader already has the ElectronX id this change gives `trader_id`."""
-    exchange_id = (after or {}).get("exchange_trader_id")
-    if not exchange_id:
+def _check_accounts(conn: Connection, after: dict[str, Any] | None) -> None:
+    """ChangeError(409) if the change lets a user trade on an account electronx.accounts does not have."""
+    wanted = (after or {}).get("accounts") or []
+    if not wanted:
         return
     cur = conn.cursor()
-    cur.execute(
-        f"SELECT trader_id, exchange_trader_id FROM {SCHEMA}.traders"
-        " WHERE exchange_trader_id = %(id)s AND trader_id <> %(trader)s",  # in any case, as SQL Server compares
-        {"id": exchange_id, "trader": trader_id},
-    )
-    row = cur.fetchone()
-    if row is not None:
-        raise ChangeError(
-            409, f"{row[0]} already has the ElectronX id {row[1]}: each ElectronX id belongs to one trader"
-        )
+    cur.execute(f"SELECT account_id FROM {SCHEMA}.accounts")
+    missing = sorted(set(wanted) - {row[0] for row in cur.fetchall()})
+    if missing:
+        raise ChangeError(409, f"no ElectronX account {', '.join(missing)} in electronx.accounts")
 
 
 def current_rules(conn: Connection) -> dict[str, list[dict[str, Any]]]:
     """Every trader, entitlement and limit row, for showing in the app."""
     cur = conn.cursor(as_dict=True)
-    cur.execute(f"SELECT trader_id, exchange_trader_id, active, note FROM {SCHEMA}.traders ORDER BY trader_id")
-    traders = [dict(r, active=bool(r["active"])) for r in cur.fetchall()]
+    cur.execute(f"SELECT user_id, display_name AS name, active, note FROM {SCHEMA}.users ORDER BY user_id")
+    users = [dict(r, active=bool(r["active"]), roles=[], accounts=[]) for r in cur.fetchall()]
+    by_id = {u["user_id"]: u for u in users}
+    cur.execute(f"SELECT user_id, role FROM {SCHEMA}.user_roles ORDER BY role")
+    for r in cur.fetchall():
+        by_id[r["user_id"]]["roles"].append(r["role"])
+    cur.execute(f"SELECT user_id, account_id FROM {SCHEMA}.account_access ORDER BY account_id")
+    for r in cur.fetchall():
+        by_id[r["user_id"]]["accounts"].append(r["account_id"])
+    cur.execute(f"SELECT account_id, name, capacity, active FROM {SCHEMA}.accounts ORDER BY account_id")
+    accounts = [dict(r, active=bool(r["active"])) for r in cur.fetchall()]
     cur.execute(f"SELECT trader_id, market, product FROM {SCHEMA}.entitlements ORDER BY trader_id, market, product")
     entitlements = list(cur.fetchall())
     cur.execute(
@@ -197,7 +235,7 @@ def current_rules(conn: Connection) -> dict[str, list[dict[str, Any]]]:
             if r[n] is not None:
                 r[n] = int(r[n]) if n in WHOLE_LOTS else float(r[n])
         limits.append(r)
-    return {"traders": traders, "entitlements": entitlements, "limits": limits}
+    return {"users": users, "accounts": accounts, "entitlements": entitlements, "limits": limits}
 
 
 # ---- proposing and deciding ------------------------------------------------------------------------
@@ -216,8 +254,8 @@ def propose(conn: Connection, user: str, change: ProposedChange) -> int:
         raise ChangeError(409, "there is no such rule to remove")
     if after == before:
         raise ChangeError(409, "that is already the rule")
-    if change.kind == "trader":
-        _check_id_free(conn, change.trader_id, after)
+    if change.kind == "user":
+        _check_accounts(conn, after)
     cur = conn.cursor()
     cur.execute(
         f"INSERT {SCHEMA}.rule_changes (kind, action, trader_id, market, product, before_json, after_json, reason,"
@@ -264,6 +302,8 @@ def approve(conn: Connection, change_id: int, user: str) -> None:
         row = _pending(conn, change_id)
         if row["requested_by"] == user:
             raise ChangeError(403, "a change needs a second person: someone else has to approve it")
+        if row["kind"] not in KINDS:
+            raise ChangeError(409, f"a {row['kind']} change no longer fits the rules: propose it again")
         key = _key(row)
         before = None if row["before_json"] is None else json.loads(row["before_json"])
         if _current(conn, row["kind"], key, lock=True) != before:
@@ -271,11 +311,11 @@ def approve(conn: Connection, change_id: int, user: str) -> None:
             conn.commit()
             raise ChangeError(409, "the rule changed after this was proposed, so it was not applied; propose it again")
         after = None if row["after_json"] is None else json.loads(row["after_json"])
-        if row["kind"] == "trader":
-            _check_id_free(conn, key["trader_id"], after)  # someone may have been given it since
+        if row["kind"] == "user":
+            _check_accounts(conn, after)  # an account may have gone since
         _apply(conn, row["kind"], key, before, after)
-        if row["kind"] == "trader" and after and after.get("exchange_trader_id"):
-            fill_in_traders(conn, after["exchange_trader_id"])  # their screen orders recorded before now
+        if row["kind"] == "user" and after:
+            fill_in_traders(conn, key["trader_id"])  # their screen orders recorded before they were added
         _decide(conn, change_id, "approved", user)
         conn.commit()
     except Exception:
@@ -284,13 +324,12 @@ def approve(conn: Connection, change_id: int, user: str) -> None:
 
 
 def _apply(conn: Connection, kind: str, key: dict[str, str], before: dict | None, after: dict | None) -> None:
+    if kind == "user":
+        _apply_user(conn, key["trader_id"], before, after)
+        return
     cur = conn.cursor()
-    table = {"trader": "traders", "entitlement": "entitlements", "limit": "limits"}[kind]
-    where = (
-        "trader_id = %(trader_id)s"
-        if kind == "trader"
-        else ("trader_id = %(trader_id)s AND market = %(market)s AND product = %(product)s")
-    )
+    table = {"entitlement": "entitlements", "limit": "limits"}[kind]
+    where = "trader_id = %(trader_id)s AND market = %(market)s AND product = %(product)s"
     if after is None:
         cur.execute(f"DELETE FROM {SCHEMA}.{table} WHERE {where}", key)
         return
@@ -304,13 +343,44 @@ def _apply(conn: Connection, kind: str, key: dict[str, str], before: dict | None
     params = key | after
     columns = list(after)
     if before is None:
-        names = (["trader_id"] if kind == "trader" else ["trader_id", "market", "product"]) + columns
+        names = ["trader_id", "market", "product"] + columns
         cur.execute(
             f"INSERT {SCHEMA}.{table} ({', '.join(names)}) VALUES ({', '.join(f'%({n})s' for n in names)})", params
         )
     else:
         sets = ", ".join(f"{c} = %({c})s" for c in columns)
         cur.execute(f"UPDATE {SCHEMA}.{table} SET {sets}, updated_at = sysutcdatetime() WHERE {where}", params)
+
+
+def _apply_user(conn: Connection, user_id: str, before: dict | None, after: dict | None) -> None:
+    """The user row, then their roles and accounts exactly as `after` lists them."""
+    cur = conn.cursor()
+    who = {"id": user_id}
+    if after is None:
+        cur.execute(f"DELETE FROM {SCHEMA}.users WHERE user_id = %(id)s", who)  # roles and access go too
+        return
+    row = who | {"name": after["name"], "active": after["active"], "note": after["note"]}
+    if before is None:
+        cur.execute(
+            f"INSERT {SCHEMA}.users (user_id, display_name, active, note)"
+            " VALUES (%(id)s, %(name)s, %(active)s, %(note)s)",
+            row,
+        )
+    else:
+        cur.execute(
+            f"UPDATE {SCHEMA}.users SET display_name = %(name)s, active = %(active)s, note = %(note)s,"
+            " updated_at = sysutcdatetime() WHERE user_id = %(id)s",
+            row,
+        )
+    cur.execute(f"DELETE FROM {SCHEMA}.user_roles WHERE user_id = %(id)s", who)
+    for role in after["roles"]:
+        cur.execute(f"INSERT {SCHEMA}.user_roles (user_id, role) VALUES (%(id)s, %(role)s)", who | {"role": role})
+    cur.execute(f"DELETE FROM {SCHEMA}.account_access WHERE user_id = %(id)s", who)
+    for account in after["accounts"]:
+        cur.execute(
+            f"INSERT {SCHEMA}.account_access (user_id, account_id) VALUES (%(id)s, %(account)s)",
+            who | {"account": account},
+        )
 
 
 def reject(conn: Connection, change_id: int, user: str, note: str = "") -> None:
