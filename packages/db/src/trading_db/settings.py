@@ -1,11 +1,13 @@
 """Where the database is, from environment variables (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD,
-DB_ENCRYPT)."""
+DB_ENCRYPT), and which environment uses it (TRADING_ENV: see trading_core.environment)."""
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+
+from trading_core.environment import environment_from
 
 
 class ConfigError(Exception):
@@ -20,6 +22,7 @@ class DbSettings:
     user: str = "sa"
     password: str = ""
     encrypt: bool = True  # TLS to the server; see connect() for what it does and does not check
+    environment: str = "development"  # development, beta or production: connect() checks the database's
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> DbSettings:
@@ -28,6 +31,10 @@ class DbSettings:
 
         if not get("DB_PASSWORD"):
             raise ConfigError("DB_PASSWORD is not set (copy services/db.env.example to services/db.env)")
+        try:
+            environment = environment_from(env)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
         return cls(
             host=get("DB_HOST", "127.0.0.1"),
             port=int(get("DB_PORT", "1433")),
@@ -35,6 +42,7 @@ class DbSettings:
             user=get("DB_USER", "sa"),
             password=get("DB_PASSWORD"),
             encrypt=get("DB_ENCRYPT", "Y").upper() in ("Y", "YES", "1", "TRUE"),
+            environment=environment,
         )
 
     def on(self, database: str) -> DbSettings:
@@ -42,4 +50,7 @@ class DbSettings:
         return replace(self, database=database)
 
     def __repr__(self) -> str:  # never print the password
-        return f"DbSettings({self.user}@{self.host}:{self.port}/{self.database}, encrypt={self.encrypt})"
+        return (
+            f"DbSettings({self.user}@{self.host}:{self.port}/{self.database}, encrypt={self.encrypt}, "
+            f"{self.environment})"
+        )

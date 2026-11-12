@@ -16,7 +16,8 @@ from pathlib import Path
 import uvicorn
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from trading_core import BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, decode_blocks
+from trading_core import BLOCKS_KEY, KILLSWITCH_KEY, KillSwitchState, WrongEnvironment, decode_blocks
+from trading_core.environment import check_folder, check_redis_async
 from trading_db import follow_rules
 from trading_fix import AlreadyRunning, FixSession, SeqStore, build_ssl_context, lock_state_dir
 
@@ -136,6 +137,13 @@ async def main() -> None:
     stop_task = asyncio.create_task(stop.wait(), name="stop")
 
     redis = Redis.from_url(settings.redis_url)
+    try:
+        check_folder(settings.state_dir, settings.db.environment)
+        await check_redis_async(redis, settings.db.environment)
+    except WrongEnvironment as exc:
+        await redis.aclose()
+        sys.exit(f"wrong environment: {exc}")
+    log.info("environment: %s", settings.db.environment)
     state_path = settings.state_dir / "orders.json"
     recovering = asyncio.create_task(recover_when_possible(redis, state_path), name="recover")
     await asyncio.wait({recovering, stop_task}, return_when=asyncio.FIRST_COMPLETED)

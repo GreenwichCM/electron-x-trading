@@ -11,6 +11,8 @@ import time
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from trading_core import WrongEnvironment
+from trading_core.environment import check_redis_async
 from trading_fix import FixSession, SeqStore, build_ssl_context
 
 from .app import MarketDataApp
@@ -58,6 +60,12 @@ async def main() -> None:
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     redis = Redis.from_url(settings.redis_url)
+    try:
+        await check_redis_async(redis, settings.environment)
+    except WrongEnvironment as exc:
+        await redis.aclose()
+        sys.exit(f"wrong environment: {exc}")
+    log.info("environment: %s", settings.environment)
     publisher = RedisPublisher(redis)
     app = MarketDataApp(
         publisher,

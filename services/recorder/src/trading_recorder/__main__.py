@@ -9,7 +9,8 @@ import sys
 import threading
 
 from redis import Redis
-from trading_db import ConfigError, connect
+from trading_core.environment import check_redis
+from trading_db import ConfigError, WrongEnvironment, connect
 
 from .recorder import Recorder, SchemaError
 from .settings import Settings
@@ -29,12 +30,19 @@ def main() -> None:
         signal.signal(sig, lambda *_: stop.set())
 
     redis = Redis.from_url(settings.redis_url)
+    try:
+        check_redis(redis, settings.db.environment)
+    except WrongEnvironment as exc:
+        redis.close()
+        sys.exit(f"wrong environment: {exc}")
     recorder = Recorder(redis, lambda: connect(settings.db, appname="recorder"), batch=settings.batch)
     log.info("recording orders, fills and alerts into %r", settings.db)
     try:
         recorder.run(stop)
     except SchemaError as exc:
         sys.exit(str(exc))
+    except WrongEnvironment as exc:
+        sys.exit(f"wrong environment: {exc}")
     finally:
         redis.close()
     log.info("stopped after recording %d entries", recorder.recorded)

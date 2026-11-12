@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from trading_core import environment_from
 from trading_fix import SessionConfig, TlsConfig
 
 
@@ -22,6 +23,7 @@ class Settings:
     redis_url: str
     break_grace_s: float
     log_level: str
+    environment: str = "development"  # TRADING_ENV
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
@@ -48,6 +50,14 @@ class Settings:
                 client_key=Path(get("DC_CLIENT_KEY", "certs/client.key")),
                 server_name=get("DC_TLS_SERVER_NAME"),
             )
+        try:
+            environment = environment_from(env)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        if environment == "production" and tls is None:
+            raise ConfigError("production needs DC_TLS=Y (the ElectronX gateway uses mutual TLS)")
+        if environment == "production" and session.host in ("127.0.0.1", "localhost", "::1"):
+            raise ConfigError(f"DC_HOST is {session.host}, the simulator: production needs ElectronX's address")
         return cls(
             session=session,
             tls=tls,
@@ -55,4 +65,5 @@ class Settings:
             redis_url=get("REDIS_URL", "redis://127.0.0.1:6379/0"),
             break_grace_s=float(get("DC_BREAK_GRACE_S", "5")),
             log_level=get("LOG_LEVEL", "INFO").upper(),
+            environment=environment,
         )

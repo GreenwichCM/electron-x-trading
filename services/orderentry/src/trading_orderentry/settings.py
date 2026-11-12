@@ -39,6 +39,11 @@ class Settings:
         def get(key: str, default: str = "") -> str:
             return env.get(key, "").strip() or default
 
+        if env.get("TRADING_ENV", "").strip().lower() == "production":
+            raise ConfigError(
+                "production is record-only for now: orders are entered on the ElectronX screen, and orderentry "
+                "does not run until sign-in is in place (see Production in README.md)"
+            )
         missing = [k for k in ("OE_PASSWORD", "OE_INTERNAL_TOKEN") if not get(k)]
         if missing:
             raise ConfigError(f"not set: {', '.join(missing)} (see services/orderentry/.env.example)")

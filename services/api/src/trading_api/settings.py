@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from trading_core import environment_from
 from trading_db import DbSettings
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -27,18 +28,29 @@ class Settings:
     oe_token: str = ""
     db: DbSettings | None = None  # services/db.env; without it the trading rules pages answer 503
     rules_refresh_s: float = 10.0  # how often the users and trading rules are reloaded
+    environment: str = "development"  # TRADING_ENV: development, beta or production
+    order_entry: bool = True  # ORDER_ENTRY=N: record-only, orders are entered on the ElectronX screen
 
     def __post_init__(self) -> None:
         if self.dev_login and self.host not in LOOPBACK:
             raise ConfigError(f"API_DEV_LOGIN is only allowed when API_HOST is localhost (it is {self.host})")
         if self.dev_login and len(self.dev_secret) < 32:
             raise ConfigError("API_DEV_SECRET must be at least 32 characters when API_DEV_LOGIN=Y")
+        if self.environment == "production" and self.order_entry:
+            raise ConfigError(
+                "production is record-only for now: set ORDER_ENTRY=N (services/prod.env); sending orders "
+                "from the app needs a real sign-in first"
+            )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
         def get(key: str, default: str) -> str:
             return env.get(key, "").strip() or default
 
+        try:
+            environment = environment_from(env)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
         return cls(
             redis_url=get("REDIS_URL", cls.redis_url),
             host=get("API_HOST", cls.host),
@@ -50,4 +62,6 @@ class Settings:
             oe_token=get("OE_INTERNAL_TOKEN", ""),
             db=DbSettings.from_env(env) if env.get("DB_PASSWORD", "").strip() else None,
             rules_refresh_s=float(get("RULES_REFRESH_S", str(cls.rules_refresh_s))),
+            environment=environment,
+            order_entry=get("ORDER_ENTRY", "Y").upper() in ("Y", "YES", "1", "TRUE"),
         )

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from trading_core import environment_from
 from trading_fix import SessionConfig, TlsConfig
 
 
@@ -38,6 +39,7 @@ class Settings:
     snapshot: Snapshot | None  # None: not used
     redis_url: str
     log_level: str
+    environment: str = "development"  # TRADING_ENV
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
@@ -73,6 +75,11 @@ class Settings:
             raise ConfigError("SNAPSHOT_API_KEY is set but SNAPSHOT_URL is not")
         if url:
             snapshot = Snapshot(url=url, api_key=key, poll_s=float(get("SNAPSHOT_POLL_S", "60")))
+        try:
+            environment = environment_from(env)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        check_exchange(environment, "MD", session.host, tls, url)
         symbols = tuple(s.strip() for s in get("MD_SYMBOLS").split(",") if s.strip())
         return cls(
             session=session,
@@ -85,4 +92,22 @@ class Settings:
             snapshot=snapshot,
             redis_url=get("REDIS_URL", "redis://127.0.0.1:6379/0"),
             log_level=get("LOG_LEVEL", "INFO").upper(),
+            environment=environment,
         )
+
+
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def check_exchange(environment: str, prefix: str, host: str, tls: TlsConfig | None, snapshot_url: str = "") -> None:
+    """ConfigError if the settings cannot be `environment`'s exchange: production connects to ElectronX
+    itself, over TLS, never to the simulator; and each environment's Snapshot API is its own."""
+    if environment == "production":
+        if tls is None:
+            raise ConfigError(f"production needs {prefix}_TLS=Y (the ElectronX gateway uses mutual TLS)")
+        if host in LOOPBACK:
+            raise ConfigError(f"{prefix}_HOST is {host}, the simulator: production needs ElectronX's address")
+        if "beta." in snapshot_url:
+            raise ConfigError("SNAPSHOT_URL is the beta one: production uses https://trade.electronx.com")
+    if environment == "beta" and "trade." in snapshot_url:
+        raise ConfigError("SNAPSHOT_URL is the production one: beta uses https://beta.electronx.com")

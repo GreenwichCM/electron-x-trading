@@ -142,11 +142,11 @@ function StartOfDay({ p }: { p: PositionRisk }) {
 
 /** Today's P&L, limit usage and marks. Risk and management see every trader; a trader sees their own
  *  row and, if allowed, the desk's totals. */
-export default function Risk({ user }: { user: User }) {
+export default function Risk({ user, orderEntry }: { user: User; orderEntry: boolean }) {
   const [refresh, setRefresh] = useState(0);
   const data = usePolling<RiskResponse>("/api/risk", 1000, refresh);
   if (!data) return null;
-  const canBlock = user.permissions.includes("killswitch.trip");
+  const canBlock = orderEntry && user.permissions.includes("killswitch.trip"); // a block stops app orders only
   const seesAll = user.permissions.includes("risk.view.all");
   const traders = Object.keys(data.traders).sort();
   const rows = traders.flatMap((t) =>

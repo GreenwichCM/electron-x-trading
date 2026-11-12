@@ -9,6 +9,8 @@ import sys
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from trading_core import WrongEnvironment
+from trading_core.environment import check_folder, check_redis_async
 from trading_fix import AlreadyRunning, FixSession, SeqStore, build_ssl_context, lock_state_dir
 
 from .app import DropCopyApp
@@ -62,6 +64,13 @@ async def main() -> None:
         sys.exit(f"dropcopy is already running: {exc}")
 
     redis = Redis.from_url(settings.redis_url)
+    try:
+        check_folder(settings.state_dir, settings.environment)
+        await check_redis_async(redis, settings.environment)
+    except WrongEnvironment as exc:
+        await redis.aclose()
+        sys.exit(f"wrong environment: {exc}")
+    log.info("environment: %s", settings.environment)
     reconciler = Reconciler(grace_s=settings.break_grace_s)
     sink = RedisFillSink(redis)
     app = DropCopyApp(sink, FillJournal(settings.state_dir / "fills.jsonl"))

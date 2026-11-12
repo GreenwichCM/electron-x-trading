@@ -467,3 +467,37 @@ fieldset.choices legend {
   color: var(--muted);
   padding: 0 4px;
 }
+
+/* Which exchange: grey for the simulator, amber for beta, red for production */
+.env-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.env-badge.beta {
+  border-color: #d9a441;
+  background: rgba(217, 164, 65, 0.15);
+  color: #f2c46d;
+}
+.env-badge.production {
+  border-color: #e5484d;
+  background: #c62f35;
+  color: #fff;
+}
+.login .env-badge {
+  margin-bottom: 12px;
+}
+.record-only {
+  margin: 0 0 16px;
+  padding: 8px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, clearToken, getToken, Unauthorized, type User } from "./auth";
 import Blotter from "./Blotter";
 import DepthLadder from "./DepthLadder";
+import EnvironmentBadge from "./EnvironmentBadge";
+import { type Environment, useEnvironment } from "./environment";
 import KillSwitch from "./KillSwitch";
 import Login from "./Login";
 import OrderTicket, { type TicketPreset } from "./OrderTicket";
@@ -20,7 +22,17 @@ type RiskPositions = {
   desk: { positions: Record<string, number> } | null;
 };
 
-function Workspace({ user, token, onSignOut }: { user: User; token: string; onSignOut: () => void }) {
+function Workspace({
+  user,
+  token,
+  env,
+  onSignOut,
+}: {
+  user: User;
+  token: string;
+  env: Environment | null;
+  onSignOut: () => void;
+}) {
   const { orders } = useOrders(token, onSignOut);
   const risk = usePolling<RiskPositions>("/api/risk", 5000);
   const seesAll = user.permissions.includes("risk.view.all");
@@ -64,11 +76,13 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
   };
   const orderList = Object.values(orders).sort((a, b) => b.created.localeCompare(a.created));
   const canTrade = user.permissions.includes("orders.trade");
+  const orderEntry = env?.order_entry ?? false;
 
   return (
     <main>
       <header>
         <h1>ElectronX trading</h1>
+        <EnvironmentBadge env={env} />
         <span className={`status ${status}`}>{status}</span>
         <div className="spacer" />
         <div className="user">
@@ -79,7 +93,16 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
           Sign out
         </button>
       </header>
-      <KillSwitch user={user} />
+      {orderEntry ? (
+        <KillSwitch user={user} />
+      ) : (
+        env && (
+          <p className="record-only">
+            Record-only: orders are entered on the ElectronX screen, and every order and fill of the account is
+            recorded here. Nothing can be sent from this app, so there is no order ticket or kill switch.
+          </p>
+        )
+      )}
       <div className="workspace">
         <PriceBoard
           board={board}
@@ -91,13 +114,15 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
           onSelect={setSelected}
         />
         <div className="side-panel">
-          <OrderTicket
-            symbols={board.watched}
-            canTrade={canTrade}
-            preset={preset}
-            instruments={board.instruments}
-            books={books}
-          />
+          {orderEntry && (
+            <OrderTicket
+              symbols={board.watched}
+              canTrade={canTrade}
+              preset={preset}
+              instruments={board.instruments}
+              books={books}
+            />
+          )}
           <DepthLadder
             symbol={selected}
             book={books[selected]}
@@ -109,7 +134,7 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
       {user.permissions.includes("risk.view.all") && <UnknownUsers />}
       <Blotter orders={orderList} user={user} />
       {(user.permissions.includes("risk.view.own") || user.permissions.includes("risk.view.all")) && (
-        <Risk user={user} />
+        <Risk user={user} orderEntry={orderEntry} />
       )}
       {user.permissions.includes("risk.view.all") && <Positions />}
       {(user.permissions.includes("risk.view.all") || user.permissions.includes("orders.trade")) && <Rules user={user} />}
@@ -128,6 +153,7 @@ function Workspace({ user, token, onSignOut }: { user: User; token: string; onSi
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
+  const env = useEnvironment();
 
   // A token left in this tab from before: check it is still valid.
   useEffect(() => {
@@ -150,6 +176,6 @@ export default function App() {
 
   if (checking) return null;
   const token = getToken();
-  if (!user || !token) return <Login onLogin={setUser} />;
-  return <Workspace user={user} token={token} onSignOut={signOut} />;
+  if (!user || !token) return <Login env={env} onLogin={setUser} />;
+  return <Workspace user={user} token={token} env={env} onSignOut={signOut} />;
 }

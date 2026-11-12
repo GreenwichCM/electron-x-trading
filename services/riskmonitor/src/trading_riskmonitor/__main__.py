@@ -9,6 +9,8 @@ import signal
 import sys
 
 from redis.asyncio import Redis
+from trading_core import WrongEnvironment
+from trading_core.environment import check_redis_async
 from trading_db import ConfigError, follow_rules
 
 from .engine import RiskEngine
@@ -25,6 +27,11 @@ async def main() -> None:
         sys.exit(f"config error: {exc}")
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     redis = Redis.from_url(settings.redis_url)
+    try:
+        await check_redis_async(redis, settings.db.environment)
+    except WrongEnvironment as exc:
+        await redis.aclose()
+        sys.exit(f"wrong environment: {exc}")
     engine = RiskEngine(max_spread=settings.max_spread, trading_day=settings.trading_day)
     log.info("trading day %s, from %s", engine.today, settings.trading_day.starts_at(engine.today))
     await load_sod(redis, engine)
@@ -46,7 +53,9 @@ async def main() -> None:
     stop_task = asyncio.create_task(stop.wait(), name="stop")
     done, _ = await asyncio.wait({*tasks, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in done - {stop_task}:
-        if task.exception() is not None:
+        if isinstance(task.exception(), WrongEnvironment):
+            log.error("wrong environment: %s", task.exception())
+        elif task.exception() is not None:
             log.error("%s failed", task.get_name(), exc_info=task.exception())
     log.info("stopping")
     for task in tasks:

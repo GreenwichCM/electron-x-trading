@@ -28,6 +28,13 @@ the development SQL Server its `DB_PASSWORD` is `MSSQL_SA_PASSWORD` from `.env`.
 
 Only one copy of orderentry and of dropcopy may run at a time; a second one refuses to start.
 
+There are three environments, each with its own Redis database, state folders and SQL database:
+development (the simulator; `Procfile`), beta (ElectronX beta, beta.electronx.com; `Procfile.uat`) and
+production (trade.electronx.com; `Procfile.prod`). `TRADING_ENV` says which one a service belongs to
+(development when not set). The first service to use a Redis database, state folder or SQL database marks
+it as its environment's, and services of another environment refuse it at startup with "wrong
+environment: ... belongs to beta, but this is production": the settings point at the wrong one.
+
     uv sync
     npm --prefix web install
     docker compose up -d
@@ -114,7 +121,8 @@ To try it, have the simulator place screen orders as dave, and as someone who is
 
 ## ElectronX demo (UAT)
 
-The same services connect to the ElectronX demo environment instead of the simulator. `Procfile.uat`
+The same services connect to the ElectronX demo environment, beta (beta.electronx.com), instead of the
+simulator. `Procfile.uat`
 starts them without the simulator. Each service loads its usual `.env`, then `services/uat.env` (its own
 Redis database and SQL database, `trading_uat`, so nothing mixes with the simulator's), then its own
 `uat.env` with the exchange's address, passwords and certificates. All of these and the certificates are
@@ -124,7 +132,7 @@ git-ignored: never commit them. Stop the development stack first; both use the a
    then `chmod 600 certs/client.key`.
 2. Settings: copy `services/uat.env.example` to `services/uat.env`, and in `services/marketdata`,
    `services/orderentry` and `services/dropcopy` copy `uat.env.example` to `uat.env`. Fill in the three
-   passwords from the ElectronX FIX connectivity sheet.
+   passwords from the ElectronX FIX connectivity sheet. `services/uat.env` says `TRADING_ENV=beta`.
 3. Check the way to the exchange without logging on (no FIX password is used):
 
        uv run --env-file services/marketdata/.env --env-file services/marketdata/uat.env python -m trading_fix.check MD
@@ -152,6 +160,67 @@ the rest of the 30,000 or so contracts the demo lists follow in the background.
 For production, ElectronX reviews the order entry session's activity in the demo environment against
 minimum message counts (logons, heartbeats, resend requests, rejects, orders, cancels). They were met on
 21 October 2026 by the earlier client (electron-x-oms, `exoms conformance`).
+
+## Production (record-only)
+
+`Procfile.prod` connects to ElectronX production (trade.electronx.com) and records; it sends nothing.
+Traders enter their orders on the ElectronX screen. The drop copy reports every order and fill of the
+account, and the recorder keeps them in the production database, POWER (`services/db.power.env`), with
+`source = 'electronx'` and the trader's ElectronX login, as in "Orders from the ElectronX screen" above.
+Market data, positions, P&L and the risk pages work as in beta.
+
+There is no order entry session. orderentry refuses to run with `TRADING_ENV=production`, the api runs
+with `ORDER_ENTRY=N` (`services/prod.env`), and the app shows no order ticket, kill switch or trader
+blocks: they only ever stop orders sent from the app. Sending orders from the app waits for a real
+sign-in (Google, step 14). Until then, anyone who can open the app on this machine can pick any user on
+the development sign-in page, which is fine for looking, not for trading.
+
+Production keeps everything apart from development and beta: Redis database 2, `var/prod`, `certs/prod`
+and POWER. It also only marks an empty Redis database, state folder or SQL database as its own: one that
+already has data without a mark was used by development or beta, so it is refused rather than mixed in.
+Production also refuses `MD_TLS=N` or `DC_TLS=N`, a host on this machine (the simulator) and the beta
+Snapshot API; beta refuses the production Snapshot API.
+
+1. Certificates: put the three production files from ElectronX in `certs/prod/` (`ca.crt`, `client.crt`,
+   `client.key`), then `chmod 600 certs/prod/client.key`. The beta ones stay in `certs/`.
+2. Settings: copy `services/prod.env.example` to `services/prod.env`, `services/db.power.env.example` to
+   `services/db.power.env` (the production database login), and in `services/marketdata` and
+   `services/dropcopy` copy `prod.env.example` to `prod.env`. Fill in the host, port, SenderCompID and
+   password of each session from the production FIX connectivity sheet. All are git-ignored.
+3. Check the way to the exchange without logging on:
+
+       uv run --env-file services/marketdata/.env --env-file services/prod.env --env-file services/marketdata/prod.env python -m trading_fix.check MD
+       uv run --env-file services/dropcopy/.env --env-file services/prod.env --env-file services/dropcopy/prod.env python -m trading_fix.check DC
+
+4. Database. Bring POWER's schema up to date, then look at what it holds:
+
+       uv run --env-file services/db.power.env --env-file services/prod.env python -m trading_db migrate
+       uv run --env-file services/db.power.env python -m trading_db clear-data
+
+   POWER still has rows from development tests. Once you have checked they are only test rows, delete them
+   (this asks for the database's name; it refuses a database marked as production's):
+
+       uv run --env-file services/db.power.env python -m trading_db clear-data --confirm POWER
+
+5. The first users. Every later change goes through the Trading rules page, proposed by one person and
+   approved by another with the risk role, so add at least two people with risk directly:
+
+       uv run --env-file services/db.power.env --env-file services/prod.env python -m trading_db add-user jane@greenwichcm.com --roles trader,risk --accounts TA-HURON-00001
+
+   Their email is their ElectronX login and their id. A missing account is added too (capacity 2).
+   `add-user` stops working once two active users have the risk role: add everyone else on the page. The
+   first one also marks POWER as production's, after which development and beta refuse it.
+6. Start: `uv run honcho -f Procfile.prod start` (stop the development and beta stacks first). The app's
+   header says "ElectronX PRODUCTION · record-only". A trader's order on the ElectronX screen shows in the
+   blotter, marked ElectronX, as theirs.
+7. Daily: anyone who traded on the ElectronX screen without being a user here (their orders are recorded
+   with no trader until they are added):
+
+       uv run --env-file services/db.power.env --env-file services/prod.env python -m trading_db check-traders
+
+Before relying on it: run it on a machine that stays on (a laptop that sleeps misses the drop copy until
+it catches up on reconnecting), and check POWER's server certificate (`connect()` encrypts the connection
+but does not verify the certificate yet; on one machine that was fine, across the internet it is not).
 
 ## History in SQL Server
 

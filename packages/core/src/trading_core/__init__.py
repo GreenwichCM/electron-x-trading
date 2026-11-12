@@ -1,5 +1,6 @@
 """Shared ElectronX definitions used across the trading platform."""
 
+from .environment import ENVIRONMENTS, WrongEnvironment, environment_from
 from .instruments import (
     DATA_START_DATE,
     LOT_SIZE_MWH,
@@ -20,6 +21,7 @@ __all__ = [
     "ALERTS_STREAM",
     "BLOCKS_KEY",
     "DATA_START_DATE",
+    "ENVIRONMENTS",
     "KILLSWITCH_KEY",
     "LOT_SIZE_MWH",
     "MARKET_LAUNCH_DATES",
@@ -35,6 +37,8 @@ __all__ = [
     "Trader",
     "TraderBlock",
     "TradingRules",
+    "WrongEnvironment",
     "decode_blocks",
+    "environment_from",
     "market_and_product",
 ]

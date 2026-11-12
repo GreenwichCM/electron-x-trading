@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import signal
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -26,7 +27,8 @@ from trading_core import (
     TradingRules,
     decode_blocks,
 )
-from trading_db import follow_rules
+from trading_core.environment import check_redis_async
+from trading_db import DbError, WrongEnvironment, connect, follow_rules
 
 from .auth import DEV_USERS, Authenticator, DevAuthenticator, User, users_from_rules
 from .hub import ClientFeed, MarketDataHub
@@ -86,10 +88,14 @@ def create_app(
     if auth is None:
         raise ConfigError("no login configured: set API_DEV_LOGIN=Y for development")
     oe = orderentry or OrderEntryClient(settings.oe_url, settings.oe_token)
+    record_only = not settings.order_entry  # no orderentry: every order is from the ElectronX screen
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         client = redis if redis is not None else Redis.from_url(settings.redis_url)
+        await check_redis_async(client, settings.environment)  # WrongEnvironment stops the api here
+        if settings.db is not None:
+            await asyncio.to_thread(check_database_now, settings)
         app.state.redis = client
         app.state.hub = MarketDataHub(client)
         app.state.orders = OrderHub(client)
@@ -107,8 +113,11 @@ def create_app(
                 if dev is not None:
                     dev.set_users(users_from_rules(rules))
 
-            rules = follow_rules(settings.db, on_rules, settings.rules_refresh_s, appname="api")
-            tasks.append(asyncio.create_task(rules, name="rules"))
+            rules = asyncio.create_task(
+                follow_rules(settings.db, on_rules, settings.rules_refresh_s, appname="api"), name="rules"
+            )
+            rules.add_done_callback(stop_if_wrong_environment)
+            tasks.append(rules)
         yield
         for task in tasks:
             task.cancel()
@@ -120,6 +129,7 @@ def create_app(
             await client.aclose()
 
     app = FastAPI(title="ElectronX trading api", lifespan=lifespan)
+    app.state.environment = settings.environment
     app.add_middleware(GZipMiddleware, minimum_size=2000)  # the instrument list shrinks about tenfold
 
     # ---- authentication and permissions ----------------------------------------------------
@@ -148,6 +158,12 @@ def create_app(
             return user.id
         raise HTTPException(status_code=403, detail="missing permission orders.view.own")
 
+    def no_order_entry_here() -> None:
+        if record_only:
+            raise HTTPException(
+                status_code=409, detail="record-only: orders are entered on the ElectronX screen, not from here"
+            )
+
     async def call_orderentry(coro: Any) -> Any:
         try:
             return await coro
@@ -162,6 +178,12 @@ def create_app(
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/environment")
+    async def environment() -> dict[str, Any]:
+        """Which exchange this is (development = the simulator, beta, production), and whether orders can be
+        sent from the app. No sign-in needed: the login page shows it too."""
+        return {"name": settings.environment, "order_entry": settings.order_entry}
 
     if dev is not None:
 
@@ -210,7 +232,7 @@ def create_app(
         """Orders sent from this app (from orderentry) and orders entered on the ElectronX screen (from
         the drop copy, `source` "electronx"), newest first."""
         scope = order_scope(user)
-        ours = await call_orderentry(oe.list(scope))
+        ours = [] if record_only else await call_orderentry(oe.list(scope))
         both = [*ours, *app.state.orders.screen_orders(scope)]
         return sorted(both, key=lambda o: o.get("created") or "", reverse=True)
 
@@ -218,11 +240,13 @@ def create_app(
     async def new_order(
         body: NewOrderRequest, user: Annotated[User, Depends(require("orders.trade"))]
     ) -> dict[str, Any]:
+        no_order_entry_here()
         # The trader is always the signed-in user: nobody can place an order in someone else's name.
         return await call_orderentry(oe.submit(user.id, body.symbol, body.side, body.qty, body.price, body.tif))
 
     @app.post("/api/orders/{cl_ord_id}/cancel")
     async def cancel_order(cl_ord_id: str, user: Annotated[User, Depends(require("orders.trade"))]) -> dict[str, Any]:
+        no_order_entry_here()
         return await call_orderentry(oe.cancel(user.id, cl_ord_id))
 
     @app.get("/api/killswitch")
@@ -265,7 +289,7 @@ def create_app(
         raw = await app.state.redis.get(DC_POSITIONS_KEY)
         dc = json.loads(raw) if raw else {"positions": {}, "connected": False, "time": ""}
         try:
-            by_trader = await oe.positions()
+            by_trader = {} if record_only else await oe.positions()  # record-only: nothing is ours
         except OrderEntryUnavailable, OrderEntryError:
             by_trader = None
         exchange = dict(dc["positions"])
@@ -453,7 +477,7 @@ def create_app(
             for order in hub.screen_orders(scope):
                 feed.put(order["cl_ord_id"], order, replace=False)
             try:
-                for order in await oe.list(scope):
+                for order in [] if record_only else await oe.list(scope):
                     feed.put(order["cl_ord_id"], order, replace=False)
             except (OrderEntryUnavailable, OrderEntryError) as exc:
                 log.warning("could not load existing orders: %s", exc)
@@ -462,3 +486,19 @@ def create_app(
             hub.disconnect(feed)
 
     return app
+
+
+def check_database_now(settings: Settings) -> None:
+    """Connecting checks the database belongs to this environment (WrongEnvironment if not). If it cannot
+    be reached now, the rules follower checks when it can (stop_if_wrong_environment)."""
+    assert settings.db is not None
+    try:
+        connect(settings.db, appname="api", login_timeout=5).close()
+    except DbError as exc:
+        log.warning("cannot reach %r yet (%s)", settings.db, exc)
+
+
+def stop_if_wrong_environment(task: asyncio.Task) -> None:
+    if not task.cancelled() and isinstance(task.exception(), WrongEnvironment):
+        log.critical("wrong environment, stopping: %s", task.exception())
+        signal.raise_signal(signal.SIGTERM)  # uvicorn shuts down; honcho then stops the rest

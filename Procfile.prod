@@ -1,0 +1,13 @@
+# ElectronX production (trade.electronx.com), record-only: `uv run honcho -f Procfile.prod start`.
+# Traders enter orders on the ElectronX screen; the drop copy records every order and fill of the account into
+# the production database (POWER, services/db.power.env). There is no order entry session, so nothing can be
+# sent from this app (orderentry refuses to run in production for now).
+# Each service loads its usual .env, then services/prod.env (TRADING_ENV=production and production's own Redis
+# database), then its own prod.env (the exchange's address, passwords and the certificates in certs/prod).
+# Stop the development and beta stacks first: they use the same api and web ports. See "Production" in README.md.
+marketdata: uv run --env-file services/marketdata/.env --env-file services/prod.env --env-file services/marketdata/prod.env python -m trading_marketdata
+dropcopy: uv run --env-file services/dropcopy/.env --env-file services/prod.env --env-file services/dropcopy/prod.env python -m trading_dropcopy
+riskmonitor: uv run --env-file services/db.power.env --env-file services/riskmonitor/.env --env-file services/prod.env python -m trading_riskmonitor
+recorder: uv run --env-file services/db.power.env --env-file services/recorder/.env --env-file services/prod.env python -m trading_recorder
+api: uv run --env-file services/db.power.env --env-file services/api/.env --env-file services/prod.env python -m trading_api
+web: npm --prefix web run dev

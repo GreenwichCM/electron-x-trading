@@ -5,6 +5,9 @@ uv run --env-file services/db.env python -m trading_db status     # which migrat
 uv run --env-file services/db.env python -m trading_db seed-dev   # starting rules for the test users
 uv run --env-file services/db.env python -m trading_db reconcile  # orderentry's reports against the drop copy's
 uv run --env-file services/db.env python -m trading_db check-traders [--fill-in]  # screen orders with no trader
+uv run --env-file services/db.power.env --env-file services/prod.env python -m trading_db add-user EMAIL \
+    --roles trader,risk --accounts TA-HURON-00001   # the first users of a new database (production)
+uv run --env-file services/db.power.env python -m trading_db clear-data [--confirm POWER]  # delete test data
 """
 
 from __future__ import annotations
@@ -15,17 +18,29 @@ import sys
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
+from trading_core.environment import WrongEnvironment
+
 from .attribution import fill_in_traders, traders_without_account, unknown_users
+from .changes import ChangeError
 from .connection import DbError, connect
 from .migrate import MigrationError, migrate, status
 from .reconcile import SETTLE_S, reconcile
 from .rules import seed_dev_rules
 from .settings import ConfigError, DbSettings
+from .setup import add_user, clear_data, marked_as, row_counts
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m trading_db")
-    parser.add_argument("command", choices=["migrate", "status", "seed-dev", "reconcile", "check-traders"])
+    parser.add_argument(
+        "command",
+        choices=["migrate", "status", "seed-dev", "reconcile", "check-traders", "add-user", "clear-data"],
+    )
+    parser.add_argument("user", nargs="?", help="add-user: their ElectronX login (company email)")
+    parser.add_argument("--roles", default="", help="add-user: trader, risk, management (comma-separated)")
+    parser.add_argument("--accounts", default="", help="add-user: ElectronX accounts they may trade on")
+    parser.add_argument("--name", default="", help="add-user: their name (default: the email before @)")
+    parser.add_argument("--confirm", default="", help="clear-data: the database's name, to really delete")
     parser.add_argument("--hours", type=float, default=24, help="reconcile: how far back to look")
     parser.add_argument(
         "--fill-in", action="store_true", help="check-traders: give blank rows to whoever has their id now"
@@ -46,12 +61,49 @@ def main() -> None:
             sys.exit(0 if print_reconciliation(settings, args.hours) else 1)
         elif args.command == "check-traders":
             sys.exit(0 if check_traders(settings, args.fill_in) else 1)
+        elif args.command == "add-user":
+            add_first_user(settings, args)
+        elif args.command == "clear-data":
+            clear(settings, args.confirm)
         elif seed_dev_rules(settings):
             print(f"{settings!r}: added the test users (alice, bob, carol, dave, erin @example.test) and their rules")
         else:
             print(f"{settings!r}: electronx.users already has rows; nothing changed")
-    except (ConfigError, MigrationError, *DbError) as exc:  # DbError is a tuple of classes
+    except (ConfigError, MigrationError, WrongEnvironment, *DbError) as exc:  # DbError is a tuple of classes
         sys.exit(f"error: {exc}")
+
+
+def add_first_user(settings: DbSettings, args: argparse.Namespace) -> None:
+    """One of the first users of a new database (see setup.py)."""
+    if not args.user or not args.roles:
+        sys.exit("error: add-user needs the email and --roles (and --accounts for a trader)")
+    roles = [r.strip() for r in args.roles.split(",") if r.strip()]
+    accounts = [a.strip() for a in args.accounts.split(",") if a.strip()]
+    with closing(connect(settings)) as conn:
+        try:
+            added = add_user(conn, args.user, roles, accounts, args.name)
+        except ChangeError as exc:
+            sys.exit(f"error: {exc}")
+    print(f"{settings!r}: added {args.user.strip().lower()} ({', '.join(sorted(roles))})")
+    if added:
+        print(f"  and the ElectronX account {', '.join(added)} (capacity 2)")
+
+
+def clear(settings: DbSettings, confirm: str) -> None:
+    """Show what the electronx tables hold; with --confirm <database name>, delete all of it."""
+    with closing(connect(settings, check_environment=False)) as conn:  # it may be another environment's
+        counts, mark = row_counts(conn), marked_as(conn)
+        print(f"{settings!r}: marked as {mark or 'nobody'}'s")
+        for table, n in counts.items():
+            print(f"  electronx.{table}: {n} rows")
+        if confirm != settings.database:
+            print(f"nothing deleted: to delete every row above, add --confirm {settings.database}")
+            return
+        try:
+            deleted = clear_data(conn)
+        except ChangeError as exc:
+            sys.exit(f"error: {exc}")
+    print(f"deleted {sum(deleted.values())} rows; the tables are empty and the database is marked by nobody")
 
 
 def check_traders(settings: DbSettings, fill_in: bool) -> bool:

@@ -19,7 +19,7 @@ from typing import Any
 
 from redis import Redis
 from redis.exceptions import RedisError
-from trading_db import LATEST, Connection, DbError, schema_version
+from trading_db import LATEST, Connection, DbError, WrongEnvironment, schema_version
 
 from . import store
 from .rows import alert_row, bust_row, decode_entry, fill_row, order_row, report_row
@@ -168,7 +168,7 @@ class Recorder:
         while not stop.is_set():
             try:
                 self.step()
-            except SchemaError:
+            except SchemaError, WrongEnvironment:
                 raise
             except DbError as exc:
                 log.warning("SQL Server error (%s); reconnecting in %.0fs", exc, RETRY_S)
