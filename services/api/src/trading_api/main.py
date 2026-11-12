@@ -17,6 +17,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from trading_core import (
@@ -527,6 +528,11 @@ def create_app(
             await pump(ws, feed, "order")
         finally:
             hub.disconnect(feed)
+
+    # The built web app at /, after every /api and /ws route: production's always-on machine runs no
+    # development web server (deploy/install-services.sh sets API_WEB_DIST=web/dist).
+    if settings.web_dist:
+        app.mount("/", StaticFiles(directory=settings.web_dist, html=True), name="web")
 
     return app
 

@@ -237,6 +237,78 @@ Before relying on it: run it on a machine that stays on (a laptop that sleeps mi
 it catches up on reconnecting), and check POWER's server certificate (`connect()` encrypts the connection
 but does not verify the certificate yet; on one machine that was fine, across the internet it is not).
 
+## Production on the always-on machine
+
+Production runs on a Windows machine that stays on (the remote desktop), not on a laptop: a laptop that
+sleeps stops recording. The same code runs there as Linux services in WSL: `deploy/install-services.sh`
+makes one systemd service per process in `Procfile.prod`, which systemd starts when WSL starts and restarts
+if it stops; Redis runs in Docker (`deploy/compose.prod.yaml`, kept on disk); the api serves the built web
+app, at http://localhost:8000 in a browser on that machine. A Windows scheduled task starts WSL when Windows
+starts, so it all comes back after a restart with nobody signed in.
+
+ElectronX allows one connection per session: production runs on one machine at a time. ElectronX must
+allow the machine's public IP on the production sessions, and POWER's Azure SQL firewall too.
+
+### Setting up the machine (once)
+
+1. Windows, in PowerShell as administrator: `wsl --install -d Ubuntu-26.04` (`wsl --list --online` lists the
+   names), and choose a Linux user name and password when it asks. Stop it sleeping:
+   `powercfg /change standby-timeout-ac 0` and `powercfg /change hibernate-timeout-ac 0`, and set Windows
+   Update's active hours to cover the trading day (7:00am to 8:00pm CT).
+2. In Ubuntu: systemd on (`/etc/wsl.conf` has `[boot]` and `systemd=true`; then `wsl --shutdown` in
+   PowerShell and open Ubuntu again), and the tools:
+
+       sudo apt update && sudo apt install -y git curl nodejs npm
+       curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker $USER
+       curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   Close Ubuntu and open it again (for the docker group and uv on the PATH).
+3. The code, from the private repository (`git clone <its address> ~/trading`), or without one as a bundle:
+   on the laptop `git -C ~/trading bundle create /mnt/c/Users/<you>/Downloads/trading.bundle --all`, copy the
+   file to the machine over RDP (copy and paste in Explorer, or the laptop's drives under `\\tsclient`), then
+   `git clone /mnt/c/Users/<you>/Downloads/trading.bundle ~/trading`. Then:
+
+       cd ~/trading && uv sync && npm --prefix web ci && npm --prefix web run build
+
+4. The secrets git does not carry (settings files and `certs/prod`): on the laptop
+   `bash deploy/pack-secrets.sh`, copy `~/trading-prod-secrets.tgz` the same way, and on the machine
+   `tar xzf /mnt/c/Users/<you>/Downloads/trading-prod-secrets.tgz -C ~/trading`. Then delete every copy of
+   the file (both Downloads folders and the laptop's home): it holds passwords and the private key.
+5. Redis, and a check of the way to ElectronX without logging on (it proves ElectronX accepts this machine's
+   address and the certificates):
+
+       docker compose -f deploy/compose.prod.yaml up -d
+       uv run --env-file services/marketdata/.env --env-file services/prod.env --env-file services/marketdata/prod.env python -m trading_fix.check MD
+       uv run --env-file services/dropcopy/.env --env-file services/prod.env --env-file services/dropcopy/prod.env python -m trading_fix.check DC
+
+6. The services, installed but not started: `sudo bash deploy/install-services.sh`.
+7. Start WSL with Windows: in PowerShell as administrator,
+   `powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-26.04\home\<linux user>\trading\deploy\windows\start-wsl-at-boot.ps1 -Distro Ubuntu-26.04`.
+   Windows asks for your Windows password: a task that runs while nobody is signed in needs it.
+
+### Switching production over
+
+1. On the laptop, stop production (Ctrl-C in its honcho), then `bash deploy/pack-secrets.sh --state` and copy
+   `~/trading-prod-state.tgz` over. Drop copy's sequence numbers run all week, so the machine must carry on
+   from the laptop's (after Sunday 06:15 UTC they start again anyway).
+2. On the machine: `tar xzf /mnt/c/Users/<you>/Downloads/trading-prod-state.tgz -C ~/trading`, then
+   `sudo systemctl start trading.target`, and after a few seconds `uv run python deploy/status.py`: every
+   service active, drop copy connected, order books filling. The app is at http://localhost:8000.
+3. Restart Windows once and, before opening anything, check `deploy/status.py` again: the services should
+   have started with Windows.
+
+From then on, never run `Procfile.prod` on the laptop: two connections on one session knock each other off.
+
+### Running it
+
+* `uv run python deploy/status.py`: services, drop copy, order books, trades, the api, whether ElectronX is
+  open, the recorder's progress, and the last hour's warnings.
+* Logs: `journalctl -u trading-dropcopy -f` (one service), `journalctl -u 'trading-*' --since today` (all).
+* Stop and start: `sudo systemctl stop trading.target`, `sudo systemctl start trading.target`; one service:
+  `sudo systemctl restart trading-api`.
+* New code: `git pull` (or `git pull /mnt/c/Users/<you>/Downloads/trading.bundle main` with a new bundle),
+  then `bash deploy/update.sh`: packages, database migrations, the web app, then a restart and the status.
+
 ## History in SQL Server
 
 The recorder copies every order update, fill and alert into SQL Server. Redis keeps only the latest

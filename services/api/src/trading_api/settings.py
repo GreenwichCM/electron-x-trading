@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from trading_core import environment_from
 from trading_core.hours import parse_holidays
@@ -33,12 +34,17 @@ class Settings:
     environment: str = "development"  # TRADING_ENV: development, beta or production
     order_entry: bool = True  # ORDER_ENTRY=N: record-only, orders are entered on the ElectronX screen
     exchange_holidays: frozenset[date] = frozenset()  # EXCHANGE_HOLIDAYS: days ElectronX is closed
+    web_dist: str = ""  # API_WEB_DIST: the built web app (web/dist) to serve at /, or "" for none
 
     def __post_init__(self) -> None:
         if self.dev_login and self.host not in LOOPBACK:
             raise ConfigError(f"API_DEV_LOGIN is only allowed when API_HOST is localhost (it is {self.host})")
         if self.dev_login and len(self.dev_secret) < 32:
             raise ConfigError("API_DEV_SECRET must be at least 32 characters when API_DEV_LOGIN=Y")
+        if self.web_dist and not (Path(self.web_dist) / "index.html").is_file():
+            raise ConfigError(
+                f"API_WEB_DIST: no index.html in {self.web_dist}; build the web app: npm --prefix web run build"
+            )
         if self.environment == "production" and self.order_entry:
             raise ConfigError(
                 "production is record-only for now: set ORDER_ENTRY=N (services/prod.env); sending orders "
@@ -69,4 +75,5 @@ class Settings:
             environment=environment,
             order_entry=get("ORDER_ENTRY", "Y").upper() in ("Y", "YES", "1", "TRUE"),
             exchange_holidays=holidays,
+            web_dist=get("API_WEB_DIST", ""),
         )

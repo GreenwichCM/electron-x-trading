@@ -1,0 +1,22 @@
+# Production's Redis on the always-on machine: `docker compose -f deploy/compose.prod.yaml up -d`, once.
+# Docker starts it again by itself after a restart of WSL or Windows. It keeps its data on disk (append-only
+# file), so a restart loses neither the streams the recorder has not copied yet nor the time & sales.
+# Production uses its own database in it (2, from services/prod.env), as on a development machine.
+name: trading-prod
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"   # reachable from WSL and this Windows machine only, not from the network
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+volumes:
+  redis-data:
